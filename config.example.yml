@@ -1,0 +1,196 @@
+# Preflight Integration Tester Configuration
+# Copy to config.yml and customize for your environment
+
+# Application settings
+app:
+  name: "Preflight Integration Tester"
+  version: "0.1.0"
+  debug: false
+  log_level: "INFO"
+  max_workers: 4
+  timeout_minutes: 30
+
+# Enterprise system connections (read-only credentials only)
+connections:
+  # ERP Systems
+  sap:
+    enabled: false
+    host: "your-sap-host"
+    username: "readonly_user"
+    password: "${SAP_PASSWORD}"  # Use environment variable
+    client: "100"
+    system_number: "00"
+
+  oracle_erp:
+    enabled: false
+    host: "your-oracle-host"
+    port: 1521
+    service_name: "ORCL"
+    username: "readonly_user"
+    password: "${ORACLE_PASSWORD}"
+
+  dynamics_365:
+    enabled: false
+    url: "https://your-org.crm.dynamics.com"
+    client_id: "your-client-id"
+    client_secret: "${D365_CLIENT_SECRET}"
+    tenant_id: "your-tenant-id"
+
+  # CRM Systems
+  salesforce:
+    enabled: false
+    username: "readonly@yourcompany.com"
+    password: "${SFDC_PASSWORD}"
+    security_token: "${SFDC_TOKEN}"
+    domain: "login"  # or "test" for sandbox
+
+  hubspot:
+    enabled: false
+    api_key: "${HUBSPOT_API_KEY}"
+
+  # Data Warehouses
+  snowflake:
+    enabled: false
+    account: "your-account.snowflakecomputing.com"
+    username: "readonly_user"
+    password: "${SNOWFLAKE_PASSWORD}"
+    warehouse: "COMPUTE_WH"
+    database: "PROD_DB"
+    schema: "PUBLIC"
+
+  databricks:
+    enabled: false
+    hostname: "your-workspace.cloud.databricks.com"
+    http_path: "/sql/1.0/warehouses/your-warehouse-id"
+    access_token: "${DATABRICKS_TOKEN}"
+
+  redshift:
+    enabled: false
+    host: "your-cluster.redshift.amazonaws.com"
+    port: 5439
+    database: "prod"
+    username: "readonly_user"
+    password: "${REDSHIFT_PASSWORD}"
+
+  # Databases
+  postgresql:
+    enabled: false
+    host: "your-postgres-host"
+    port: 5432
+    database: "production"
+    username: "readonly_user"
+    password: "${POSTGRES_PASSWORD}"
+
+  mysql:
+    enabled: false
+    host: "your-mysql-host"
+    port: 3306
+    database: "production"
+    username: "readonly_user"
+    password: "${MYSQL_PASSWORD}"
+
+# AI deployment scenario to test
+scenario:
+  name: "Customer Service AI Assistant"
+  description: "AI agent that helps customer service reps access customer data across systems"
+
+  # Systems the AI agent will interact with
+  systems:
+    - "salesforce"     # Customer records and cases
+    - "sap"           # Order history and billing
+    - "postgresql"    # Product catalog
+
+  # Expected usage patterns
+  usage:
+    concurrent_users: 50
+    queries_per_minute: 200
+    peak_multiplier: 3.0
+    response_time_target_ms: 500
+
+  # Key business entities to analyze
+  entities:
+    - name: "customer"
+      primary_system: "salesforce"
+      fields: ["id", "name", "email", "phone", "status"]
+
+    - name: "order"
+      primary_system: "sap"
+      fields: ["id", "customer_id", "date", "status", "total"]
+
+    - name: "product"
+      primary_system: "postgresql"
+      fields: ["id", "name", "category", "price"]
+
+# Analysis configuration
+analysis:
+  schema_consistency:
+    enabled: true
+    entity_matching_threshold: 0.8
+    field_similarity_threshold: 0.7
+
+  pipeline_stress_test:
+    enabled: true
+    duration_minutes: 5
+    ramp_up_seconds: 30
+
+  middleware_assessment:
+    enabled: true
+    integration_patterns: ["rest_api", "message_queue", "database_view"]
+
+  data_quality:
+    enabled: true
+    sample_size: 1000
+    quality_checks: ["completeness", "consistency", "validity"]
+
+# Reporting configuration
+reporting:
+  output_format: ["html", "pdf", "json"]
+  include_executive_summary: true
+  include_technical_details: true
+  include_remediation_plan: true
+
+  # Risk scoring weights
+  risk_weights:
+    schema_inconsistency: 0.3
+    pipeline_bottleneck: 0.25
+    middleware_gap: 0.2
+    data_quality: 0.15
+    security_concern: 0.1
+
+# Security settings
+security:
+  encryption_key: "${ENCRYPTION_KEY}"
+  audit_logging: true
+  data_retention_days: 90
+
+  # VPC deployment settings
+  vpc:
+    enabled: false
+    subnet_id: "subnet-xxx"
+    security_group_id: "sg-xxx"
+
+# Performance settings
+performance:
+  connection_timeout: 30
+  query_timeout: 300
+  max_concurrent_connections: 10
+  batch_size: 1000
+
+# Output paths
+output:
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+  cache_dir: "./cache"
+
+# Optional integrations
+integrations:
+  slack:
+    enabled: false
+    webhook_url: "${SLACK_WEBHOOK}"
+
+  email:
+    enabled: false
+    smtp_server: "smtp.yourcompany.com"
+    smtp_port: 587
+    username: "${EMAIL_USERNAME}"
+    password: "${EMAIL_PASSWORD}"
