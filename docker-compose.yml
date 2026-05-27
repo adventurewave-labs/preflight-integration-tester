@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  preflight:
+    build:
+      context: .
+      target: production
+    image: preflight-integration-tester:latest
+    container_name: preflight-app
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgresql://preflight:preflight_pass@postgres:5432/preflight
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - preflight-reports:/app/reports
+      - preflight-logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - preflight-net
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: preflight-postgres
+    environment:
+      - POSTGRES_DB=preflight
+      - POSTGRES_USER=preflight
+      - POSTGRES_PASSWORD=preflight_pass
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U preflight"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - preflight-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: preflight-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - preflight-net
+
+  # Worker for background diagnostic jobs
+  worker:
+    build:
+      context: .
+      target: production
+    image: preflight-integration-tester:latest
+    container_name: preflight-worker
+    command: ["celery", "-A", "preflight.worker", "worker", "--loglevel=info", "--concurrency=4"]
+    environment:
+      - DATABASE_URL=postgresql://preflight:preflight_pass@postgres:5432/preflight
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=INFO
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - preflight-net
+
+volumes:
+  postgres-data:
+  redis-data:
+  preflight-reports:
+  preflight-logs:
+
+networks:
+  preflight-net:
+    driver: bridge

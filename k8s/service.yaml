@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: preflight-api
+  namespace: preflight
+  labels:
+    app: preflight-api
+spec:
+  selector:
+    app: preflight-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: preflight-ingress
+  namespace: preflight
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - preflight.example.com
+      secretName: preflight-tls
+  rules:
+    - host: preflight.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: preflight-api
+                port:
+                  number: 80

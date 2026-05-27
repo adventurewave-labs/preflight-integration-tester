@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preflight-api
+  namespace: preflight
+  labels:
+    app: preflight-api
+    version: "0.1.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: preflight-api
+  template:
+    metadata:
+      labels:
+        app: preflight-api
+        version: "0.1.0"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: preflight-api
+          image: preflight-integration-tester:0.1.0
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: preflight-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: preflight-secrets
+                  key: redis-url
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: reports
+              mountPath: /app/reports
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: reports
+          persistentVolumeClaim:
+            claimName: preflight-reports-pvc
+        - name: config
+          configMap:
+            name: preflight-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preflight-worker
+  namespace: preflight
+  labels:
+    app: preflight-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: preflight-worker
+  template:
+    metadata:
+      labels:
+        app: preflight-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: preflight-worker
+          image: preflight-integration-tester:0.1.0
+          command: ["celery", "-A", "preflight.worker", "worker", "--loglevel=info"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: preflight-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: preflight-secrets
+                  key: redis-url
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
