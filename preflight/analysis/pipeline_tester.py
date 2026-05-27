@@ -112,102 +112,128 @@ class PipelineTester:
     async def run_load_test(
         self,
         system_name: str,
-        query_fn: Callable[[int], Awaitable[bool]],  # async function that executes one query
+        query_fn: Callable[[int], Awaitable[bool]],
         test_config: LoadTestConfig,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> PipelineTestResult:
-        """Run a load test against a system using the provided query function."""
+        """Run a load test using a fixed worker pool pattern."""
         result = PipelineTestResult(system_name=system_name, config=test_config)
-        metrics: List[RequestMetrics] = []
+        metrics: list = []
 
-        logger.info(f"Starting load test for {system_name}: {test_config.target_qps} QPS for {test_config.duration_seconds}s")
+        logger.info(f"Starting load test for {system_name}: target {test_config.target_qps} QPS for {test_config.duration_seconds}s")
 
-        start_time = time.time()
-        semaphore = asyncio.Semaphore(test_config.concurrent_workers)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=test_config.concurrent_workers * 2)
+        stop_event = asyncio.Event()
+        request_counter = [0]
 
-        async def execute_request(worker_id: int) -> RequestMetrics:
-            async with semaphore:
+        async def worker(worker_id: int) -> None:
+            """Consumer: pull request IDs from queue, execute, record metrics."""
+            while not stop_event.is_set() or not queue.empty():
+                try:
+                    req_id = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+
                 req_start = time.time()
                 try:
                     success = await asyncio.wait_for(
-                        query_fn(worker_id),
+                        query_fn(req_id),
                         timeout=test_config.timeout_ms / 1000
                     )
                     req_end = time.time()
-                    return RequestMetrics(
+                    metrics.append(RequestMetrics(
                         start_time=req_start,
                         end_time=req_end,
-                        success=success,
+                        success=bool(success),
                         latency_ms=(req_end - req_start) * 1000,
-                    )
+                    ))
                 except asyncio.TimeoutError:
                     req_end = time.time()
-                    return RequestMetrics(
+                    metrics.append(RequestMetrics(
                         start_time=req_start,
                         end_time=req_end,
                         success=False,
                         latency_ms=test_config.timeout_ms,
                         error="timeout",
-                    )
+                    ))
                 except Exception as e:
                     req_end = time.time()
-                    return RequestMetrics(
+                    metrics.append(RequestMetrics(
                         start_time=req_start,
                         end_time=req_end,
                         success=False,
                         latency_ms=(req_end - req_start) * 1000,
-                        error=str(e),
-                    )
+                        error=str(e)[:100],
+                    ))
+                finally:
+                    queue.task_done()
 
-        # Ramp up + sustain load
-        total_requests = 0
-        tasks = []
+        async def producer() -> None:
+            """Producer: enqueue requests at the target rate."""
+            start = time.time()
+            req_id = 0
 
-        elapsed = 0
-        while elapsed < test_config.duration_seconds:
-            elapsed = time.time() - start_time
+            while True:
+                elapsed = time.time() - start
+                if elapsed >= test_config.duration_seconds:
+                    break
 
-            # Calculate current target QPS (ramp up)
-            if elapsed < test_config.ramp_up_seconds:
-                current_qps = test_config.target_qps * (elapsed / test_config.ramp_up_seconds)
-            else:
-                current_qps = test_config.target_qps
+                # Ramp up QPS
+                if elapsed < test_config.ramp_up_seconds:
+                    current_qps = test_config.target_qps * (elapsed / max(test_config.ramp_up_seconds, 0.01))
+                else:
+                    current_qps = test_config.target_qps
 
-            # Spawn requests at the right rate
-            batch_size = max(1, int(current_qps * 0.1))  # 100ms batches
-            for i in range(batch_size):
-                tasks.append(asyncio.create_task(execute_request(total_requests + i)))
-            total_requests += batch_size
+                if current_qps > 0:
+                    await queue.put(req_id)
+                    req_id += 1
+                    request_counter[0] = req_id
 
-            if progress_callback:
-                progress_callback(elapsed / test_config.duration_seconds)
+                    if progress_callback:
+                        progress_callback(elapsed / test_config.duration_seconds)
 
-            await asyncio.sleep(0.1)
+                    # Sleep to hit target QPS; cap to avoid multi-second stalls during ramp-up
+                    inter_request_delay = min(1.0 / current_qps, 0.5)
+                    await asyncio.sleep(inter_request_delay)
+                else:
+                    await asyncio.sleep(0.05)
 
-            # Limit in-flight tasks
-            if len(tasks) > test_config.concurrent_workers * 3:
-                done, tasks = await asyncio.wait(tasks[:test_config.concurrent_workers], return_when=asyncio.ALL_COMPLETED)
-                for t in done:
-                    metrics.append(t.result())
-                tasks = list(tasks)
+            stop_event.set()
 
-        # Collect remaining results
-        if tasks:
-            done = await asyncio.gather(*tasks, return_exceptions=True)
-            for m in done:
-                if isinstance(m, RequestMetrics):
-                    metrics.append(m)
+        start_time = time.time()
+
+        # Launch fixed worker pool + producer
+        workers = [asyncio.create_task(worker(i)) for i in range(test_config.concurrent_workers)]
+        producer_task = asyncio.create_task(producer())
+
+        # Wait for producer to finish
+        await producer_task
+
+        # Wait for queue to drain (max 5s after stop)
+        try:
+            await asyncio.wait_for(queue.join(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Queue drain timeout for {system_name}")
+
+        # Cancel workers
+        for w in workers:
+            w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
         end_time = time.time()
 
-        # Aggregate metrics
+        # Aggregate
         result.total_requests = len(metrics)
         result.successful_requests = sum(1 for m in metrics if m.success)
         result.failed_requests = sum(1 for m in metrics if not m.success)
         result.total_duration_seconds = end_time - start_time
         result.latencies_ms = [m.latency_ms for m in metrics if m.success]
 
-        logger.info(f"Load test complete: {result.total_requests} requests, {result.error_rate_pct:.1f}% errors, p95={result.p95_ms:.0f}ms")
+        logger.info(
+            f"Load test complete for {system_name}: "
+            f"{result.total_requests} requests, {result.error_rate_pct:.1f}% errors, "
+            f"p95={result.p95_ms:.0f}ms, actual QPS={result.actual_qps:.1f}"
+        )
         self._results.append(result)
         return result
 
