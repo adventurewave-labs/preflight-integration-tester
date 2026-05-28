@@ -37,6 +37,7 @@ credentials/
 dist/
 build/
 out/
+*.egg-info/
 reports/
 analysis-output/
 diagnostic-results/
