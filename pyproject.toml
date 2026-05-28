@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "preflight-integration-tester"
@@ -18,8 +18,8 @@ dependencies = [
     "pyyaml>=6.0",
     "jinja2>=3.1.0",
     "sqlalchemy>=2.0.0",
-    "pandas>=2.0.0",
-    "numpy>=1.24.0",
+    "celery>=5.3.0",
+    "redis>=4.6.0",
     "structlog>=23.0.0",
     "python-dotenv>=1.0.0",
     "httpx>=0.24.0",
@@ -34,6 +34,7 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.5.0",
+    "aiosqlite>=0.19.0",
 ]
 
 [project.scripts]
@@ -55,6 +56,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "-v --tb=short --cov=preflight --cov-report=term-missing"
 markers = [
