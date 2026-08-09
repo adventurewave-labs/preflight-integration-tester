@@ -3,8 +3,7 @@
 > Pre-purchase AI-readiness diagnostic that kills "pilot purgatory" before it starts
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-red.svg)](https://github.com/marcuspat/preflight-integration-tester)
-[![Enterprise Ready](https://img.shields.io/badge/Enterprise-Ready-blue.svg)](https://github.com/marcuspat/preflight-integration-tester)
+[![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-red.svg)](https://github.com/adventurewave-labs/preflight-integration-tester)
 
 ## What is Pilot Purgatory?
 
@@ -79,17 +78,17 @@ Estimated Remediation: 8-12 weeks
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+┌────────────────┐     ┌────────────────┐     ┌────────────────┐
 │   Enterprise    │────▶│   Diagnostic    │────▶│   Analysis      │
 │   Connectors    │     │    Agents       │     │    Engine       │
 │   (Read-Only)   │     │  (Simulation)   │     │  (Gap Finding)  │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+└────────────────┘     └────────────────┘     └────────────────┘
                                                           │
                                                           ▼
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+┌────────────────┐     ┌────────────────┐     ┌────────────────┐
 │   Reporting     │◀────│   Remediation   │◀────│Schema Consistency│
 │    Engine       │     │    Planner      │     │    Analyzer     │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+└────────────────┘     └────────────────┘     └────────────────┘
 ```
 
 ## 🛠️ Technology Stack
@@ -130,7 +129,7 @@ docker --version
 ### Quick Start
 ```bash
 # Clone repository
-git clone https://github.com/marcuspat/preflight-integration-tester.git
+git clone https://github.com/adventurewave-labs/preflight-integration-tester.git
 cd preflight-integration-tester
 
 # Install dependencies
@@ -141,7 +140,7 @@ cp config.example.yml config.yml
 # Edit config.yml with your system credentials
 
 # Run diagnostic
-python preflight.py --config config.yml --use-case "customer-service-ai"
+python preflight.py run --config config.yml
 
 # View report
 open reports/readiness-assessment.html
@@ -167,33 +166,43 @@ kubectl apply -f k8s/
 - **Data Isolation**: Optional VPC deployment keeps data in your environment
 - **Encryption**: All data encrypted in transit and at rest
 - **Audit Logging**: Full activity log for compliance requirements
-- **Standards**: SOC2 Type II, GDPR compliant
 
-## 📈 Supported Systems
+## 📈 Planned integrations
 
-### ERP Platforms
+### Implemented today
+
+The connectors that exist in this repository (see
+`preflight/core/infrastructure/connectors/`):
+
+- **Salesforce** (CRM)
+- **Snowflake** (data warehouse)
+- **PostgreSQL** (database)
+- **Mock connector** (for demos and testing; the real connectors also fall
+  back to mock mode when their client libraries are not installed)
+
+### Planned (not yet implemented)
+
+**ERP Platforms**
 - SAP (S/4HANA, ECC)
 - Oracle ERP Cloud
 - Microsoft Dynamics 365
 - NetSuite
 - Workday
 
-### CRM Systems
-- Salesforce
+**CRM Systems**
 - HubSpot
 - Microsoft Dynamics CRM
 - Pipedrive
 - Zoho
 
-### Data Warehouses
-- Snowflake
+**Data Warehouses**
 - Databricks
 - Amazon Redshift
 - Google BigQuery
 - Azure Synapse
 
-### Databases
-- PostgreSQL, MySQL, SQL Server
+**Databases**
+- MySQL, SQL Server
 - Oracle Database
 - MongoDB, Cassandra
 - Redis, Elasticsearch
@@ -208,19 +217,19 @@ kubectl apply -f k8s/
 
 ## 🗺️ Roadmap
 
-### v0 (MVP) - Q1 2026
+### v0 (MVP) — shipped
 - [x] Project setup and architecture
-- [ ] Basic ERP + CRM + warehouse connectors
-- [ ] Schema consistency analysis
-- [ ] Static readiness report
-- [ ] Manual configuration
+- [x] CRM (Salesforce), data warehouse (Snowflake), and PostgreSQL connectors — ERP connectors are still planned
+- [x] Schema consistency analysis
+- [x] Static readiness report
+- [x] Manual configuration
 
-### v1 - Q2 2026
-- [ ] Pipeline stress testing
-- [ ] Middleware gap estimation
+### v1 — in progress
+- [x] Pipeline stress testing
+- [x] Middleware gap estimation
 - [ ] Interactive scenario modeling
 - [ ] Self-service connection wizard
-- [ ] Executive reporting
+- [x] Executive reporting
 
 ### v2 - Q3 2026
 - [ ] Expanded connector library (20+ systems)
@@ -234,32 +243,6 @@ kubectl apply -f k8s/
 - [ ] Predictive gap analysis
 - [ ] Integration marketplace
 - [ ] White-label deployment
-
-## 💡 Success Stories
-
-### Before Preflight
-*"We spent 8 months and $2M trying to deploy our customer service AI. The vendor demo worked perfectly, but our ERP and CRM had different customer IDs. We discovered this 6 months in."*
-— **VP of Customer Operations, Fortune 500 Retailer**
-
-### After Preflight
-*"Preflight found 12 critical integration gaps in 3 days. We spent 2 months fixing them before buying anything. The AI deployment took 6 weeks instead of 8 months."*
-— **CTO, Manufacturing Company**
-
-## 💰 Pricing
-
-### Diagnostic Engagement
-- **$25k - $75k** per assessment
-- Delivered in 1-2 weeks
-- Includes remediation roadmap
-- Money-back guarantee if major gaps missed
-
-### Enterprise Annual
-- **$200k - $500k** per year
-- Unlimited assessments
-- Continuous monitoring
-- Priority support and custom connectors
-
-**ROI**: Typical enterprise AI licenses cost $500k - $5M annually. Preflight costs 5-15% of that but prevents 50-80% of failed deployments.
 
 ## 🤝 Contributing
 
@@ -280,10 +263,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 💬 Contact & Support
 
-- **Sales Inquiries**: sales@preflight.ai
-- **Technical Support**: support@preflight.ai
-- **Issues**: [GitHub Issues](https://github.com/marcuspat/preflight-integration-tester/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/marcuspat/preflight-integration-tester/discussions)
+- **Issues**: [GitHub Issues](https://github.com/adventurewave-labs/preflight-integration-tester/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/adventurewave-labs/preflight-integration-tester/discussions)
 
 ## 🙏 Acknowledgments
 
