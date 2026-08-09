@@ -7,9 +7,11 @@ numpy>=1.24.0
 pyyaml>=6.0
 
 # Enterprise system connectors
-salesforce-api>=2.0.0
+# TODO: not on PyPI — vendor or replace before enabling the real connector
+# salesforce-api>=2.0.0
 simple-salesforce>=1.12.0
-sap-rfc>=3.0.0
+# TODO: not on PyPI — vendor or replace before enabling the real connector
+# sap-rfc>=3.0.0
 cx-oracle>=8.3.0
 pymssql>=2.2.0
 psycopg2-binary>=2.9.0
