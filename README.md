@@ -5,6 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-red.svg)](https://github.com/adventurewave-labs/preflight-integration-tester)
 
+## 🎬 Demo
+
+![Preflight demo](demo.gif)
+
+A real, unedited terminal recording of `python preflight.py run --config config.yml` — this GIF is not a mockup or a scripted animation. The CLI's `run` command ships with a built-in demo dataset (synthetic Salesforce Account/Contact records vs. SAP KUNNR/VBELN records, with a deliberate entity mismatch) so it runs safely with zero configuration and no live credentials. Everything downstream of that dataset is the genuine analysis pipeline: `SchemaAnalyzer`, `MiddlewareAnalyzer`, `ReadinessCalculator`, and the Jinja2-based `HTMLReporter`, writing real report files to `./reports/`.
+
+This run scores **97.0% — GO** and flags 3 real middleware gaps (API gateway, semantic layer, REST API integration) with a 12–18 week remediation estimate. Point `config.yml` at real ERP/CRM/warehouse credentials (see [Quick Start](#quick-start)) to get a score for your actual environment instead of the demo data.
+
 ## What is Pilot Purgatory?
 
 **Pilot purgatory** is the pattern where enterprises buy expensive AI software, fail to get it into production, and never identify why. Teams discover hidden schema inconsistencies, pipeline fragility, and missing middleware *after* signing the contract — when it's too late to back out and too expensive to fix properly.
