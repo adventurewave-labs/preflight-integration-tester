@@ -9,7 +9,7 @@
 
 ![Preflight demo](demo.gif)
 
-A real, unedited terminal recording of `python preflight.py run --config config.yml` — this GIF is not a mockup or a scripted animation. The CLI's `run` command ships with a built-in demo dataset (synthetic Salesforce Account/Contact records vs. SAP KUNNR/VBELN records, with a deliberate entity mismatch) so it runs safely with zero configuration and no live credentials. Everything downstream of that dataset is the genuine analysis pipeline: `SchemaAnalyzer`, `MiddlewareAnalyzer`, `ReadinessCalculator`, and the Jinja2-based `HTMLReporter`, writing real report files to `./reports/`.
+A real, unedited terminal recording of `preflight run --config config.example.yml --mock` (installed via `pip install -e .`) — this GIF is not a mockup or a scripted animation. The CLI's `run` command ships with a built-in demo dataset (synthetic Salesforce Account/Contact records vs. SAP KUNNR/VBELN records, with a deliberate entity mismatch) so it runs safely with zero configuration and no live credentials. Everything downstream of that dataset is the genuine analysis pipeline: `SchemaAnalyzer`, `MiddlewareAnalyzer`, `ReadinessCalculator`, and the Jinja2-based `HTMLReporter`, writing real report files to `./reports/`.
 
 This run scores **97.0% — GO** and flags 3 real middleware gaps (API gateway, semantic layer, REST API integration) with a 12–18 week remediation estimate. Point `config.yml` at real ERP/CRM/warehouse credentials (see [Quick Start](#quick-start)) to get a score for your actual environment instead of the demo data.
 
