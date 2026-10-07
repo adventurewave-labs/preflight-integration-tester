@@ -97,8 +97,8 @@
 <rect x="140" y="-70" width="150" height="26" rx="13" fill="none" stroke="#f85149" stroke-width="2">
 <animate attributeName="stroke" calcMode="discrete" values="#f85149;#f85149;#3fb950" keyTimes="0;0.8;0.86" dur="5s" repeatCount="indefinite"/>
 </rect>
-<text x="215" y="-53" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" text-anchor="middle" fill="#f85149">NO-GO<animate attributeName="fill" calcMode="discrete" values="#f85149;#f85149;#3fb950" keyTimes="0;0.8;0.86" dur="5s" repeatCount="indefinite"/></text>
-<text x="215" y="-53" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" text-anchor="middle" fill="#3fb950" opacity="0">GO ✓<animate attributeName="opacity" calcMode="discrete" values="0;0;1" keyTimes="0;0.8;0.86" dur="5s" repeatCount="indefinite"/></text>
+<text x="215" y="-53" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" text-anchor="middle" fill="#f85149">NO-GO<animate attributeName="opacity" calcMode="discrete" values="1;1;0;1" keyTimes="0;0.8;0.86;1" dur="5s" repeatCount="indefinite"/></text>
+<text x="215" y="-53" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" text-anchor="middle" fill="#3fb950" opacity="0">GO ✓<animate attributeName="opacity" calcMode="discrete" values="0;0;1;0" keyTimes="0;0.8;0.86;1" dur="5s" repeatCount="indefinite"/></text>
 
 </g>
 </svg>
