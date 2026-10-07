@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.svg" alt="preflight-integration-tester — animated banner" width="100%"></p>
+
 # Preflight Integration Tester
 
 > Pre-purchase AI-readiness diagnostic that kills "pilot purgatory" before it starts
