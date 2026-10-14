@@ -38,8 +38,17 @@ class CreateScenarioRequest(BaseModel):
     queries_per_minute: int = Field(60, ge=1, le=10000)
     peak_multiplier: float = Field(2.0, ge=1.0, le=10.0)
     response_time_target_ms: int = Field(500, ge=50, le=30000)
-    business_entities: List[str] = Field(default_factory=list)
+    business_entities: List["BusinessEntity"] = Field(default_factory=list)
     use_case: str = ""
+
+
+class BusinessEntity(BaseModel):
+    """A business entity declared in the scenario (same shape as the YAML
+    config's scenario.entities), used for declared entity matching."""
+
+    name: str
+    fields: List[str] = Field(default_factory=list)
+    primary_system: Optional[str] = None
 
 class CreateDiagnosticRunRequest(BaseModel):
     name: str

@@ -34,6 +34,25 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
     """
     from preflight.analysis.pipeline_runner import resolve_connector_type
 
+    # Optional host allowlist (comma-separated) for multi-tenant deployments:
+    # PREFLIGHT_ALLOWED_HOSTS=db.internal,crm.internal — empty/unset means
+    # unrestricted, which is the intended single-tenant pre-purchase usage.
+    import os
+
+    allowed = {
+        h.strip()
+        for h in os.environ.get("PREFLIGHT_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    }
+    target_host = (config or {}).get("host") or (config or {}).get("account") or ""
+    if allowed and target_host and target_host not in allowed:
+        return {
+            "status": "failed",
+            "error_message": f"host '{target_host}' is not in the allowed hosts list",
+            "entity_count": 0,
+            "connection_latency_ms": None,
+        }
+
     start = time.monotonic()
     requested = connector_type or ""
     # Resolve aliases the same way the pipeline runner does, so a connection

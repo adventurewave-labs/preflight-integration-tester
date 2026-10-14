@@ -78,8 +78,8 @@ async def _run_diagnostic(
             "queries_per_minute": request.scenario.queries_per_minute,
             "peak_multiplier": request.scenario.peak_multiplier,
             "response_time_target_ms": request.scenario.response_time_target_ms,
-            "business_entities": request.scenario.business_entities,
-            "entities": request.scenario.business_entities,
+            "business_entities": [be.model_dump() for be in request.scenario.business_entities],
+            "entities": [be.model_dump() for be in request.scenario.business_entities],
         }
 
         # ── The real pipeline (shared with the CLI) ─────────────────────────

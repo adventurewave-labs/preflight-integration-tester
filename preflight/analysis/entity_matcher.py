@@ -22,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ class EntityGroup:
     tables: Dict[str, str] = field(default_factory=dict)  # system -> table name
     method: str = "exact"  # exact | declared | vocabulary | field_overlap
     confidence: float = 1.0
+    # Internal bookkeeping for folding later attachments into `confidence`.
+    _score_sum: float = 0.0
+    _score_count: int = 0
 
     def as_match_info(self) -> Dict:
         return {
@@ -115,19 +118,45 @@ class EntityMatcher:
         field_similarity_threshold: float = 0.8,
         group_field_threshold: float = 0.3,
         pair_field_threshold: float = 0.35,
+        max_field_overlap_candidates: int = 400,
     ):
         self.field_similarity_threshold = field_similarity_threshold
         self.group_field_threshold = group_field_threshold
         self.pair_field_threshold = pair_field_threshold
+        # Step 4 (field-overlap pairing) is quadratic in table count; beyond
+        # this many candidate tables it is skipped (exact/declared/vocabulary
+        # passes still run) and a note is logged — better a partial match set
+        # than a frozen diagnostic.
+        self.max_field_overlap_candidates = max_field_overlap_candidates
+        # Per-instance caches: the matcher is short-lived and normalization
+        # plus pairwise similarity are pure functions of the names, so a
+        # large real estate pays the SequenceMatcher cost once per pair.
+        self._norm_cache: Dict[str, str] = {}
+        self._sim_cache: Dict[Tuple[str, str], Optional[float]] = {}
 
     # ------------------------------------------------------------------
     # Field-level helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _norm_field(name: str) -> str:
-        # Single source of truth: see normalize_field_name above.
-        return normalize_field_name(name)
+    def _norm_field(self, name: str) -> str:
+        cached = self._norm_cache.get(name)
+        if cached is None:
+            cached = normalize_field_name(name)
+            self._norm_cache[name] = cached
+        return cached
+
+    def _pair_similarity(self, na: str, nb: str) -> Optional[float]:
+        """Similarity of two *normalized* names, cached; None = prefiltered."""
+        key = (na, nb) if na <= nb else (nb, na)
+        cached = self._sim_cache.get(key)
+        if cached is not None:
+            return cached
+        if max(len(na), len(nb)) > min(len(na), len(nb)) * 3:
+            score = 0.0
+        else:
+            score = SequenceMatcher(None, na, nb, autojunk=False).ratio()
+        self._sim_cache[key] = score
+        return score
 
     def _fields_similar(self, a: str, b: str) -> bool:
         na, nb = self._norm_field(a), self._norm_field(b)
@@ -135,12 +164,8 @@ class EntityMatcher:
             return False
         if na == nb:
             return True
-        if max(len(na), len(nb)) > min(len(na), len(nb)) * 3:
-            return False
-        return (
-            SequenceMatcher(None, na, nb, autojunk=False).ratio()
-            >= self.field_similarity_threshold
-        )
+        score = self._pair_similarity(na, nb)
+        return score is not None and score >= self.field_similarity_threshold
 
     def field_overlap_score(self, declared: List[str], table_fields: List[str]) -> float:
         """Fraction of *declared* fields present (fuzzily) in the table."""
@@ -185,6 +210,10 @@ class EntityMatcher:
         }
 
         # 1. Exact same-name groups.
+        # Assignment keys are RAW (system, table): keying by the normalized
+        # name made sibling tables ('customer' and 'customers' in one
+        # system) collide, silently excluding the sibling from every later
+        # pass.
         all_names: Dict[str, List[str]] = {}
         for system, tables in norm_tables.items():
             for table in tables:
@@ -194,14 +223,15 @@ class EntityMatcher:
             if len(distinct) < 2:
                 continue
             tables: Dict[str, str] = {}
+            claimed: Set = set()
             for system in distinct:
                 for table in norm_tables[system]:
                     if normalize_table_name(table) != norm_name:
                         continue
-                    key = (system, norm_name)
-                    if key in assigned:
+                    if system in claimed:
                         continue
-                    assigned.add(key)
+                    claimed.add(system)
+                    assigned.add((system, table))
                     tables[system] = table  # one table per system, first wins
                     break
             if len(tables) >= 2:
@@ -239,7 +269,7 @@ class EntityMatcher:
                     scores.append(best_score)
             if len(chosen) >= 2:
                 for system, table in chosen.items():
-                    assigned.add((system, normalize_table_name(table)))
+                    assigned.add((system, table))
                 groups.append(
                     EntityGroup(
                         canonical_name=name,
@@ -254,15 +284,14 @@ class EntityMatcher:
             chosen: Dict[str, str] = {}
             for system, tables in norm_tables.items():
                 for table in tables:
-                    key = (system, normalize_table_name(table))
-                    if key in assigned:
+                    if (system, table) in assigned:
                         continue
                     if normalize_table_name(table) in synonyms:
                         chosen[system] = table
                         break
             if len(chosen) >= 2:
                 for system, table in chosen.items():
-                    assigned.add((system, normalize_table_name(table)))
+                    assigned.add((system, table))
                 groups.append(
                     EntityGroup(
                         canonical_name=canonical,
@@ -273,54 +302,87 @@ class EntityMatcher:
                 )
 
         # 4. Field-overlap pairing for everything still unassigned.
-        candidates = [
+        # Prefilter: only tables that share at least one EXACT normalized
+        # field name are compared with the (quadratic) fuzzy scoring —
+        # same-estate variants (staging mirrors, *_v2, per-region copies)
+        # always share column names, while genuinely different entities do
+        # not. Cross-name entities are the vocabulary/declared passes' job.
+        unassigned = [
             (system, table, fields)
             for system, tables in norm_tables.items()
             for table, fields in tables.items()
-            if (system, normalize_table_name(table)) not in assigned
+            if (system, table) not in assigned
         ]
+        if len(unassigned) > self.max_field_overlap_candidates:
+            logger.info(
+                "Entity matching: %d unassigned tables exceed the "
+                "field-overlap budget (%d); skipping the quadratic pass",
+                len(unassigned),
+                self.max_field_overlap_candidates,
+            )
+            unassigned = []
+        norm_field_sets = {
+            (system, table): {self._norm_field(f) for f in fields}
+            for system, table, fields in unassigned
+        }
+
+        def _has_cross_system_overlap(system: str, table: str) -> bool:
+            own = norm_field_sets[(system, table)]
+            return any(
+                o_sys != system and own & o_set
+                for (o_sys, _o_table), o_set in norm_field_sets.items()
+            )
+
+        candidates = [c for c in unassigned if _has_cross_system_overlap(c[0], c[1])]
         used: Set = set()
         for i, (sys_a, tab_a, fields_a) in enumerate(candidates):
-            if (sys_a, normalize_table_name(tab_a)) in used:
+            if (sys_a, tab_a) in used:
                 continue
+            set_a = norm_field_sets[(sys_a, tab_a)]
             group_tables = {sys_a: tab_a}
             scores = []
             for sys_b, tab_b, fields_b in candidates[i + 1 :]:
-                key_b = (sys_b, normalize_table_name(tab_b))
+                key_b = (sys_b, tab_b)
                 if sys_b == sys_a or sys_b in group_tables or key_b in used:
                     # one table per system, first wins — do NOT mark the
                     # skipped table as used, the second sweep may still
                     # attach it elsewhere
                     continue
+                if not (set_a & norm_field_sets[key_b]):
+                    continue  # prefilter: no exact shared field name
                 score = self.table_pair_score(fields_a, fields_b)
                 if score >= self.pair_field_threshold:
                     group_tables[sys_b] = tab_b
                     scores.append(score)
                     used.add(key_b)
             if len(group_tables) >= 2:
-                used.add((sys_a, normalize_table_name(tab_a)))
+                used.add((sys_a, tab_a))
                 groups.append(
                     EntityGroup(
                         canonical_name=normalize_table_name(tab_a),
                         tables=group_tables,
                         method="field_overlap",
                         confidence=(sum(scores) / len(scores)) if scores else 0.5,
+                        _score_sum=sum(scores),
+                        _score_count=len(scores),
                     )
                 )
 
         # 4b. Second sweep: the greedy anchor pass can strand a table that
         # matches a *member* of an existing group but not that group's anchor
         # (the anchor may already have been consumed as a member elsewhere).
-        # Try to attach every remaining table to its best-scoring existing
-        # group; one table per system per group, as everywhere else.
+        # Only field_overlap groups are extended — attaching a table via a
+        # 0.35-overlap score to a vocabulary/declared/exact group would
+        # mislabel the provenance of every finding from that table (ADR-011:
+        # method + confidence must state how the link was actually made).
         for system, tables in norm_tables.items():
             for table, fields in tables.items():
-                key = (system, normalize_table_name(table))
+                key = (system, table)
                 if key in assigned or key in used:
                     continue
                 best_group, best_score = None, 0.0
                 for group in groups:
-                    if group.method not in ("field_overlap", "vocabulary"):
+                    if group.method != "field_overlap":
                         continue
                     if system in group.tables:
                         continue
@@ -333,6 +395,11 @@ class EntityMatcher:
                         best_group, best_score = group, score
                 if best_group is not None and best_score >= self.pair_field_threshold:
                     best_group.tables[system] = table
+                    best_group._score_sum += best_score
+                    best_group._score_count += 1
+                    best_group.confidence = (
+                        best_group._score_sum / best_group._score_count
+                    )
                     used.add(key)
 
         groups = [g for g in groups if len(g.tables) >= 2]

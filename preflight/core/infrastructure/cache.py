@@ -118,6 +118,14 @@ class _DiskCacheBackend:
             _OWNED_TEMPDIRS.add(self._cache.directory)
             _arm_tempdir_cleanup()
 
+    def close(self) -> None:
+        """Close the cache and remove the temp directory we created."""
+        directory = self._cache.directory
+        self._cache.close()
+        if self._owns_directory:
+            _OWNED_TEMPDIRS.discard(directory)
+            shutil.rmtree(directory, ignore_errors=True)
+
     def get(self, key: str) -> Optional[str]:
         return self._cache.get(key)
 
@@ -376,6 +384,13 @@ class DiagnosticCache:
                 await self._redis_client.close()
             except Exception as exc:
                 logger.warning("Error closing Redis client: %s", exc)
+        if self._sync_backend is not None:
+            close = getattr(self._sync_backend, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception as exc:
+                    logger.warning("Error closing cache backend: %s", exc)
         logger.info("DiagnosticCache closed")
 
     async def __aenter__(self) -> "DiagnosticCache":

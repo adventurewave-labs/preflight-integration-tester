@@ -109,21 +109,70 @@ class TestConnectionTestFailurePaths:
         assert result["status"] == "failed"
         assert "Unknown connector type" in result["error_message"]
 
-    async def test_connect_returning_false_fails(self):
-        from preflight.api.routes.connections import _test_connection
+    async def test_connect_returning_false_fails(self, monkeypatch):
+        """Deterministic: factory returns a connector whose connect() is
+        False — no network, no psycopg2 dependency."""
+        from preflight.api.routes import connections as conn_routes
 
-        result = await _test_connection("mock", {})
-        assert result["status"] == "connected"  # sanity: mock works
+        class NoConnect:
+            async def connect(self):
+                return False
 
-        # Bad credentials against the real postgres connector: handshake
-        # fails (no server on this port in unit-test context).
-        result = await _test_connection(
-            "postgresql",
-            {"host": "127.0.0.1", "port": 59999,
-             "database": "nope", "username": "u", "password": "p"},
+            async def disconnect(self):
+                pass
+
+        monkeypatch.setattr(
+            conn_routes, "create_connector", lambda *a, **k: NoConnect()
         )
+        result = await conn_routes._test_connection("postgresql", {})
         assert result["status"] == "failed"
         assert result["connection_latency_ms"] is None
+
+    async def test_connector_creation_crash_is_failed_not_500(self, monkeypatch):
+        from preflight.api.routes import connections as conn_routes
+
+        def exploding(*a, **k):
+            raise TypeError("bad config shape")
+
+        monkeypatch.setattr(conn_routes, "create_connector", exploding)
+        result = await conn_routes._test_connection("postgresql", {"host": 42})
+        assert result["status"] == "failed"
+        assert "could not be created" in result["error_message"]
+
+    async def test_host_allowlist_enforced(self, monkeypatch):
+        from preflight.api.routes import connections as conn_routes
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal,crm.internal")
+        result = await conn_routes._test_connection(
+            "postgresql", {"host": "evil.example.com"}
+        )
+        assert result["status"] == "failed"
+        assert "not in the allowed hosts list" in result["error_message"]
+
+        # Allowed host proceeds to the (mocked) handshake.
+        class OkConnect:
+            async def connect(self):
+                return True
+
+            async def ping(self):
+                return 1.0
+
+            async def get_metadata(self):
+                meta = MagicMock()
+                meta.entity_count = 3
+                return meta
+
+            async def disconnect(self):
+                pass
+
+        monkeypatch.setattr(
+            conn_routes, "create_connector", lambda *a, **k: OkConnect()
+        )
+        result = await conn_routes._test_connection(
+            "postgresql", {"host": "db.internal"}
+        )
+        assert result["status"] == "connected"
+
 
 
 class TestMatcherSecondSweep:
@@ -462,3 +511,206 @@ class TestApiDiagnosticsMapping:
             assert rows[0]["bottleneck_type"] == "stress_test"
             assert "p95" in rows[0]["description"]
             assert rows[0]["p95_latency_ms"] == 12.5
+
+
+class TestRound5Fixes:
+    def test_second_sweep_genuinely_stranded_case(self):
+        """C matches member B but NOT anchor A: without the 4b sweep this
+        test fails (C lands in no group)."""
+        schemas = {
+            "s1": {"anchor_t": _f("p", "q", "r")},
+            "s2": {"member_u": _f("p", "q", "r", "s", "t")},
+            "s3": {"stranded_v": _f("s", "t", "u", "v")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        big = [g for g in groups if "s3" in g.tables]
+        assert big, "stranded table dropped"
+        assert set(big[0].tables) == {"s1", "s2", "s3"}
+        # attach score folded into confidence
+        assert big[0].confidence > 0
+
+    def test_sibling_tables_not_silently_skipped(self):
+        """'customer' and 'customers' in one system: the sibling must stay
+        available to the field-overlap pass instead of being swallowed by a
+        normalized-name key collision."""
+        schemas = {
+            "s1": {
+                "customer": _f("id", "name"),  # taken by vocabulary below
+                "customers": _f("id", "name", "email", "phone"),
+            },
+            "s2": {
+                "KUNNR": _f("KUNNR", "NAME1"),  # vocabulary partner for s1
+                "clients": _f("id", "name", "email", "phone"),
+            },
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        vocab = [g for g in groups if g.method == "vocabulary"]
+        assert vocab and set(vocab[0].tables) == {"s1", "s2"}
+        overlap = [g for g in groups if g.method == "field_overlap"]
+        assert overlap, "sibling 'customers' was silently skipped"
+        assert overlap[0].tables == {"s1": "customers", "s2": "clients"}
+
+    def test_second_sweep_does_not_extend_vocabulary_groups(self):
+        """Provenance: a field-overlap attachment to a vocabulary group
+        must not masquerade as a vocabulary link."""
+        schemas = {
+            "s1": {"Account": _f("Id", "Name")},
+            "s2": {"KUNNR": _f("KUNNR", "NAME1")},
+            "s3": {"weird_tbl": _f("Id", "Name", "extra1", "extra2")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        vocab = [g for g in groups if g.method == "vocabulary"]
+        assert vocab and "s3" not in vocab[0].tables
+
+    def test_perf_guard_large_estate(self):
+        """500 tables x 20 fields x 2 systems must finish fast (cached
+        normalization + exact-field prefilter + candidate cap)."""
+        import time as _time
+
+        schemas = {}
+        for sys_name in ("a", "b"):
+            schemas[sys_name] = {
+                f"t{i}": _f(*(f"shared_col_{j}" for j in range(20)))
+                for i in range(250)
+            }
+        start = _time.monotonic()
+        groups = EntityMatcher().build_entity_groups(schemas)
+        elapsed = _time.monotonic() - start
+        assert elapsed < 30, f"matcher too slow: {elapsed:.1f}s"
+        assert groups, "large estate produced no groups"
+
+    def test_candidate_cap_skips_quadratic_pass(self):
+        # Unique table names per system (no exact-name groups) AND unique
+        # field names (no shared exact fields) — the cap alone stands
+        # between this and a 90k-pair quadratic comparison.
+        schemas = {
+            sys_name: {f"{sys_name}_t{i}": _f(*[f"c{j}_{i}" for j in range(5)])
+                       for i in range(300)}
+            for sys_name in ("a", "b")
+        }
+        matcher = EntityMatcher(max_field_overlap_candidates=10)
+        groups = matcher.build_entity_groups(schemas)
+        assert groups == []
+
+
+class TestCacheLifecycle:
+    def test_close_removes_private_tempdir(self):
+        from preflight.core.infrastructure.cache import (
+            _DiskCacheBackend, _OWNED_TEMPDIRS,
+        )
+        import os
+
+        backend = _DiskCacheBackend()
+        directory = backend._cache.directory
+        assert directory in _OWNED_TEMPDIRS and os.path.isdir(directory)
+        backend.close()
+        assert directory not in _OWNED_TEMPDIRS
+        assert not os.path.isdir(directory)
+
+    def test_explicit_directory_survives_close(self):
+        import tempfile
+        from preflight.core.infrastructure.cache import _DiskCacheBackend
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = _DiskCacheBackend(directory=tmp)
+            backend.set("k", "v", ttl=None)
+            backend.close()
+            assert os.path.isdir(tmp)  # caller-owned directory untouched
+
+
+class TestCancellationCleanup:
+    async def test_cancel_during_collect_disconnects(self, monkeypatch):
+        from preflight.analysis import pipeline_runner as pr
+
+        disconnects = []
+
+        class SlowConnector:
+            async def connect(self):
+                await asyncio.sleep(30)
+                return True
+
+            async def disconnect(self):
+                disconnects.append("called")
+
+        class FastConnector:
+            async def connect(self):
+                return True
+
+            async def get_metadata(self):
+                meta = MagicMock()
+                meta.tables = []
+                return meta
+
+            async def disconnect(self):
+                disconnects.append("fast")
+
+        def factory(ctype, config, **kw):
+            return SlowConnector() if ctype == "postgresql" else FastConnector()
+
+        monkeypatch.setattr(pr, "create_connector", factory)
+        connections = [
+            {"name": "fast", "connector_type": "mock", "config": {}},
+            {"name": "slow", "connector_type": "postgresql", "config": {}},
+        ]
+        task = asyncio.get_event_loop().create_task(
+            pr.collect_real_inputs(connections, {})
+        )
+        await asyncio.sleep(0.2)  # let 'fast' complete, hit 'slow'
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert "fast" in disconnects, (
+            "cancellation must disconnect already-connected systems"
+        )
+
+
+class TestApiBusinessEntitiesShape:
+    def test_scenario_accepts_entity_dicts_and_route_passes_dicts(self):
+        """End-to-end shape check: API scenario -> route -> runner config."""
+        import json
+        from fastapi.testclient import TestClient
+        from preflight.api.dependencies import (
+            _connections_store, _runs_store, _reports_store,
+        )
+        from preflight.api.app import create_app
+        from preflight.analysis import pipeline_runner
+
+        _connections_store.clear(); _runs_store.clear(); _reports_store.clear()
+        app = create_app()
+        captured = {}
+
+        async def fake_run_diagnostic(config, mock=False, progress_cb=None, connections=None):
+            captured["entities"] = config.get("scenario", {}).get("entities")
+            return {
+                "readiness_score": 95.0, "verdict": "GO",
+                "scenario_name": "t", "executive_summary": "s",
+                "schema_inconsistencies": [], "middleware_gaps": [],
+                "pipeline_bottlenecks": [], "remediation_plan": [],
+                "critical_count": 0, "total_issues": 0,
+                "remediation_weeks": "TBD", "entity_matches": [], "warnings": [],
+            }
+
+        import unittest.mock as mock_mod
+        with mock_mod.patch.object(pipeline_runner, "run_diagnostic", fake_run_diagnostic):
+            with TestClient(app) as client:
+                conn = client.post("/connections", json={
+                    "name": "db", "connector_type": "mock",
+                    "system_type": "DATABASE", "config": {},
+                }).json()
+                client.post("/diagnostics", json={
+                    "name": "shape-test",
+                    "scenario": {
+                        "name": "t",
+                        "target_systems": ["db"],
+                        "business_entities": [
+                            {"name": "customer", "fields": ["id", "name"]}
+                        ],
+                    },
+                    "connection_ids": [conn["id"]],
+                })
+        assert captured["entities"] == [
+            {"name": "customer", "fields": ["id", "name"], "primary_system": None}
+        ]

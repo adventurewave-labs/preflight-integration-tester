@@ -218,7 +218,9 @@ async def collect_real_inputs(
                 for table in meta.tables
             }
             logger.info("Collected %d tables from %s", len(meta.tables), name)
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: a cancelled task (CancelledError)
+        # after some connects succeeded must still disconnect them.
         for system in inputs.systems:
             await _safe_disconnect(system.connector)
         raise
@@ -386,7 +388,11 @@ async def run_diagnostic(
             matcher = EntityMatcher(
                 field_similarity_threshold=schema_cfg.get('field_similarity_threshold', 0.7),
             )
-            groups = matcher.build_entity_groups(schemas, scenario.get('entities') or [])
+            # Matching is CPU-bound and quadratic-ish on large estates; keep
+            # it off the event loop so API health checks stay responsive.
+            groups = await asyncio.to_thread(
+                matcher.build_entity_groups, schemas, scenario.get('entities') or []
+            )
             entity_matches = [g.as_match_info() for g in groups]
             schema_results = analyzer.analyze_entity_groups(schemas, groups)
             inconsistencies = analyzer.generate_inconsistency_report(schema_results)
