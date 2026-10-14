@@ -110,11 +110,20 @@ class PostgreSQLConnector(BaseConnector):
         super().__init__(config, timeout_seconds)
         self._schema = config.get("schema", "public")
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pg_conn")
-        self._dsn = self._build_dsn(config)
+        self._dsn_kwargs = self._build_dsn(config)
 
     @staticmethod
-    def _build_dsn(config: Dict[str, Any]) -> str:
-        parts = []
+    def _build_dsn(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Connection parameters as a kwargs dict for psycopg2.connect.
+
+        Deliberately NOT a conninfo string: unquoted values in a
+        space-joined DSN allow conninfo injection (a crafted ``database``
+        value could smuggle in ``host=evil.example.com``), which would also
+        bypass any host allowlist. Read-only is enforced at the session
+        level in _sync_connect(); do NOT add an options=-c fragment — the
+        unquoted space breaks libpq conninfo parsing entirely.
+        """
+        params: Dict[str, Any] = {}
         for key, cfg_key in [
             ("host", "host"),
             ("port", "port"),
@@ -124,13 +133,8 @@ class PostgreSQLConnector(BaseConnector):
         ]:
             val = config.get(cfg_key) or config.get(key)
             if val is not None:
-                parts.append(f"{key}={val}")
-        # Read-only is enforced at the session level in _sync_connect()
-        # (SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY).  Do NOT add
-        # an options=-c … fragment here: the unquoted space breaks libpq
-        # conninfo parsing and makes every real connection fail with
-        # 'invalid connection option "default_transaction_read_only"'.
-        return " ".join(parts)
+                params[key] = val
+        return params
 
     def _run_sync(self, func, *args):
         """Run a blocking function in the thread pool."""
@@ -138,10 +142,14 @@ class PostgreSQLConnector(BaseConnector):
         return loop.run_in_executor(self._executor, func, *args)
 
     def _sync_connect(self):
-        conn = psycopg2.connect(
-            self._dsn,
-            connect_timeout=self.timeout_seconds,
-        )
+        # Connect with keyword arguments, NOT a conninfo string built from
+        # config values: unquoted values in a space-joined DSN allow
+        # conninfo injection (a malicious `database` value could inject
+        # `host=evil.example.com`), and keyword arguments cannot express
+        # that. Read-only is enforced below at the session level.
+        kwargs = dict(self._dsn_kwargs)
+        kwargs["connect_timeout"] = self.timeout_seconds
+        conn = psycopg2.connect(**kwargs)
         conn.autocommit = True
         # Enforce read-only at the session level
         with conn.cursor() as cur:

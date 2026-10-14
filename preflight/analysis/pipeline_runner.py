@@ -58,7 +58,10 @@ def resolve_connector_type(connector_type: str) -> Optional[str]:
 
 
 # Config keys that can name a remote host for some connector family.
-_HOST_KEYS = ("host", "account", "instance_url", "login_url", "url", "hostname")
+_HOST_KEYS = (
+    "host", "account", "instance_url", "login_url", "url", "hostname",
+    "domain",  # simple-salesforce domain (login/test)
+)
 
 
 def allowed_hosts() -> set:
@@ -87,24 +90,27 @@ def check_host_allowed(config: Dict[str, Any]) -> Optional[str]:
     allowed = allowed_hosts()
     if not allowed:
         return None
-    raw = None
+    # Check EVERY present host-like key, not just the first: a config with
+    # an allowed `host` and a disallowed `instance_url` must not pass just
+    # because the loop stopped early.
+    seen_any = False
     for key in _HOST_KEYS:
         val = (config or {}).get(key)
-        if isinstance(val, str) and val.strip():
-            raw = val.strip()
-            break
-    if raw is None:
+        if not (isinstance(val, str) and val.strip()):
+            continue
+        seen_any = True
+        candidate = val.strip().lower()
+        if "://" in candidate:
+            from urllib.parse import urlparse
+
+            candidate = (urlparse(candidate).hostname or "").lower()
+        if candidate not in allowed:
+            return f"host '{candidate}' (from '{key}') is not in the allowed hosts list"
+    if not seen_any:
         return (
             "connection config declares no host while PREFLIGHT_ALLOWED_HOSTS "
             "is set; refusing (fail closed)"
         )
-    candidate = raw.lower()
-    if "://" in candidate:
-        from urllib.parse import urlparse
-
-        candidate = (urlparse(candidate).hostname or "").lower()
-    if candidate not in allowed:
-        return f"host '{candidate}' is not in the allowed hosts list"
     return None
 
 

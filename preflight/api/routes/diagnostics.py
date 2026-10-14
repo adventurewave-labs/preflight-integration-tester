@@ -201,6 +201,7 @@ async def _run_diagnostic(
             "remediation_weeks": payload["remediation_weeks"],
             "entity_matches": payload.get("entity_matches") or [],
             "warnings": payload.get("warnings") or [],
+            "data_sources": payload.get("data_sources") or {},
         }
 
         reports_store[run_id] = report_payload

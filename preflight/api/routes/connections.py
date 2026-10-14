@@ -75,37 +75,40 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
 
     is_fallback = key != "mock" and type(connector).__name__.startswith("Mock")
     try:
-        connected = await asyncio.wait_for(connector.connect(), timeout=10)
-    except Exception as exc:
-        # Deliberately coarse message: raw driver errors can echo host/port
-        # details back to API callers, which turns this endpoint into a
-        # network-probing oracle. Full detail goes to the server log only.
-        logger.warning("Connection test failed for %r: %s", key, exc)
-        await _safe_disconnect(connector)
-        return {
-            "status": "failed",
-            "error_message": "connection failed (check host, port and credentials)",
-            "entity_count": 0,
-            "connection_latency_ms": None,
-        }
-    if not connected:
-        await _safe_disconnect(connector)
-        return {
-            "status": "failed",
-            "error_message": "connection handshake failed",
-            "entity_count": 0,
-            "connection_latency_ms": None,
-        }
+        try:
+            connected = await asyncio.wait_for(connector.connect(), timeout=10)
+        except Exception as exc:
+            # Deliberately coarse message: raw driver errors can echo
+            # host/port details back to API callers, which turns this
+            # endpoint into a network-probing oracle. Detail goes to the
+            # server log only.
+            logger.warning("Connection test failed for %r: %s", key, exc)
+            return {
+                "status": "failed",
+                "error_message": "connection failed (check host, port and credentials)",
+                "entity_count": 0,
+                "connection_latency_ms": None,
+            }
+        if not connected:
+            return {
+                "status": "failed",
+                "error_message": "connection handshake failed",
+                "entity_count": 0,
+                "connection_latency_ms": None,
+            }
 
-    latency_ms = 0.0
-    entity_count = 0
-    try:
-        latency_ms = await asyncio.wait_for(connector.ping(), timeout=10)
-        meta = await asyncio.wait_for(connector.get_metadata(), timeout=20)
-        entity_count = meta.entity_count
-    except Exception:
-        pass  # latency/entity count are best-effort; connection itself worked
-    await _safe_disconnect(connector)
+        latency_ms = 0.0
+        entity_count = 0
+        try:
+            latency_ms = await asyncio.wait_for(connector.ping(), timeout=10)
+            meta = await asyncio.wait_for(connector.get_metadata(), timeout=20)
+            entity_count = meta.entity_count
+        except Exception:
+            pass  # best-effort; the connection itself worked
+    finally:
+        # Cancellation-safe cleanup: CancelledError is a BaseException and
+        # must not leak a half-open connector either.
+        await _safe_disconnect(connector)
 
     error_message = None
     if is_fallback:

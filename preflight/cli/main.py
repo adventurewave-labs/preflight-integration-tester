@@ -106,6 +106,7 @@ async def _run_diagnostic(config_path: str, output_dir: str, format: str, mock: 
             'entity_matches': payload.get('entity_matches') or [],
             'warnings': warnings,
             'mock': payload.get('mock', mock),
+            'data_sources': payload.get('data_sources') or {},
         }
 
         if format == 'html' or format == 'text':
