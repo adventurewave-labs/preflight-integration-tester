@@ -80,30 +80,106 @@ def allowed_hosts() -> set:
     }
 
 
-def check_host_allowed(config: Dict[str, Any]) -> Optional[str]:
+_SALESFORCE_DOMAINS = {
+    "login": "login.salesforce.com",
+    "test": "test.salesforce.com",
+}
+
+
+def _host_from_url(raw: str) -> str:
+    candidate = raw.strip().lower()
+    if "://" in candidate:
+        from urllib.parse import urlparse
+
+        candidate = (urlparse(candidate).hostname or "").lower()
+    return candidate
+
+
+def resolve_effective_host(connector_type: str, config: Dict[str, Any]) -> Optional[str]:
+    """The host the connector will ACTUALLY dial, per connector family.
+
+    Validation must follow the connector's real destination resolution,
+    not a generic scan of host-like keys: for PostgreSQL, an ``account``
+    value is ignored by ``_build_dsn`` while the missing ``host`` means
+    libpq's localhost default — a generic scan would happily pass an
+    allowlist containing that ignored value.
+    """
+    config = config or {}
+    if connector_type == "mock":
+        return None  # never opens a network connection
+    if connector_type == "postgresql":
+        host = config.get("host")
+        # libpq default when no host is given: local socket / localhost.
+        return _host_from_url(host) if isinstance(host, str) and host.strip() else "localhost"
+    if connector_type == "salesforce":
+        instance_url = config.get("instance_url")
+        if isinstance(instance_url, str) and instance_url.strip():
+            return _host_from_url(instance_url)
+        domain = config.get("domain")
+        if isinstance(domain, str) and domain.strip():
+            return _SALESFORCE_DOMAINS.get(
+                domain.strip().lower(), f"{domain.strip().lower()}.salesforce.com"
+            )
+        return "login.salesforce.com"  # simple-salesforce default domain
+    if connector_type == "snowflake":
+        host = config.get("host")
+        if isinstance(host, str) and host.strip():
+            return _host_from_url(host)
+        account = config.get("account")
+        if isinstance(account, str) and account.strip():
+            account = account.strip().lower()
+            if account.endswith(".com"):  # already a full host form
+                return _host_from_url(account)
+            return f"{account}.snowflakecomputing.com"
+        return None  # no destination expressible — fail closed upstream
+    return None
+
+
+def check_host_allowed(
+    config: Dict[str, Any], connector_type: Optional[str] = None
+) -> Optional[str]:
     """Return an error string when the host allowlist blocks this config.
 
     Checked on BOTH the connection-test path and every diagnostic run —
     the run is the path that opens connections, introspects schemas and
     generates load, so testing-only enforcement would guard the wrong door.
+
+    With ``connector_type`` (the registry type), validation resolves the
+    connector's EFFECTIVE destination (see resolve_effective_host). Without
+    it (custom connectors), a generic scan of every present host-like key
+    runs instead — still fail-closed when no key is present.
     """
     allowed = allowed_hosts()
     if not allowed:
         return None
-    # Check EVERY present host-like key, not just the first: a config with
-    # an allowed `host` and a disallowed `instance_url` must not pass just
-    # because the loop stopped early.
+    if connector_type == "mock":
+        return None
+
+    if connector_type is not None:
+        effective = resolve_effective_host(connector_type, config)
+        if effective is None:
+            return (
+                f"no destination could be determined for connector "
+                f"'{connector_type}' while PREFLIGHT_ALLOWED_HOSTS is set; "
+                f"refusing (fail closed)"
+            )
+        if effective not in allowed:
+            return (
+                f"effective host '{effective}' for connector "
+                f"'{connector_type}' is not in the allowed hosts list"
+            )
+        return None
+
+    # Generic fallback: check EVERY present host-like key, not just the
+    # first — a config with an allowed `host` and a disallowed
+    # `instance_url` must not pass because the loop stopped early.
     seen_any = False
     for key in _HOST_KEYS:
         val = (config or {}).get(key)
         if not (isinstance(val, str) and val.strip()):
             continue
         seen_any = True
-        candidate = val.strip().lower()
-        if "://" in candidate:
-            from urllib.parse import urlparse
-
-            candidate = (urlparse(candidate).hostname or "").lower()
+        candidate = _host_from_url(val)
         if candidate not in allowed:
             return f"host '{candidate}' (from '{key}') is not in the allowed hosts list"
     if not seen_any:
@@ -240,7 +316,9 @@ async def collect_real_inputs(
                     f"'{conn.get('connector_type')}' yet — skipped"
                 )
                 continue
-            allow_error = check_host_allowed(conn.get('config') or {})
+            allow_error = check_host_allowed(
+                conn.get('config') or {}, connector_type=registry_type
+            )
             if allow_error is not None:
                 inputs.warnings.append(f"{name}: skipped — {allow_error}")
                 continue

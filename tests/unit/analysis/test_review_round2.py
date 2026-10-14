@@ -812,7 +812,9 @@ class TestRound7Fixes:
 
         monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
         connections = [
-            {"name": "evil", "connector_type": "mock",
+            # real type so the destination actually applies (mock never
+            # dials out and is allowed by design)
+            {"name": "evil", "connector_type": "postgresql",
              "config": {"host": "evil.example.com"}},
         ]
         with pytest.raises(pr.PipelineError):
@@ -829,7 +831,9 @@ class TestRound7Fixes:
         )
         inputs = await pr.collect_real_inputs(connections, {})
         assert [s.name for s in inputs.systems] == ["ok"]
-        assert any("not in the allowed hosts list" in w for w in inputs.warnings)
+        assert any(
+            "effective host 'evil.example.com'" in w for w in inputs.warnings
+        )
 
     async def test_allowlist_fail_closed_without_host(self, monkeypatch):
         from preflight.analysis import pipeline_runner as pr
@@ -1143,3 +1147,88 @@ class TestRound11Fixes:
         assert any("pipeline stress test failed" in w for w in payload["warnings"])
         assert not any("10.0.0.9" in w for w in payload["warnings"])
         assert payload["pipeline_bottlenecks"] == []
+
+
+class TestRound12OpenItems:
+    """The two open round-12 items, closed."""
+
+    def test_effective_destination_postgresql(self, monkeypatch):
+        from preflight.analysis.pipeline_runner import check_host_allowed
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
+        # The codex case: 'account' is IGNORED by _build_dsn; the effective
+        # destination is libpq's localhost default — must NOT pass just
+        # because the ignored value is allowlisted.
+        blocked = check_host_allowed(
+            {"account": "db.internal"}, connector_type="postgresql"
+        )
+        assert blocked is not None and "localhost" in blocked
+        assert check_host_allowed(
+            {"host": "db.internal"}, connector_type="postgresql"
+        ) is None
+        # missing host -> localhost default, honored strictly
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "localhost,db.internal")
+        assert check_host_allowed({}, connector_type="postgresql") is None
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
+        assert "localhost" in check_host_allowed(
+            {}, connector_type="postgresql"
+        )
+
+    def test_effective_destination_snowflake_and_salesforce(self, monkeypatch):
+        from preflight.analysis.pipeline_runner import check_host_allowed
+
+        monkeypatch.setenv(
+            "PREFLIGHT_ALLOWED_HOSTS",
+            "myorg-myaccount.snowflakecomputing.com,test.salesforce.com,login.salesforce.com",
+        )
+        assert check_host_allowed(
+            {"account": "myorg-myaccount"}, connector_type="snowflake"
+        ) is None
+        assert check_host_allowed(
+            {"domain": "test"}, connector_type="salesforce"
+        ) is None
+        # salesforce default when nothing is set
+        assert check_host_allowed({}, connector_type="salesforce") is None
+        # hostile account form
+        blocked = check_host_allowed(
+            {"account": "evil"}, connector_type="snowflake"
+        )
+        assert blocked is not None and "evil.snowflakecomputing.com" in blocked
+        # snowflake with nothing -> fail closed
+        assert "no destination" in check_host_allowed(
+            {}, connector_type="snowflake"
+        )
+
+    def test_mock_connector_never_blocked(self, monkeypatch):
+        from preflight.analysis.pipeline_runner import check_host_allowed
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
+        assert check_host_allowed(
+            {"host": "anything"}, connector_type="mock"
+        ) is None
+
+    def test_vocabulary_extends_exact_group_via_alias(self):
+        """A.Account + B.Account (exact 'account' group) + C.KUNNR: the
+        vocabulary pass must find the group through the alias set and
+        extend it, or C is silently excluded from analysis."""
+        schemas = {
+            "A": {"Account": _f("Id", "Name")},
+            "B": {"Account": _f("Id", "Name", "Phone")},
+            "C": {"KUNNR": _f("KUNNR", "NAME1")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        assert len(groups) == 1
+        group = groups[0]
+        assert set(group.tables) == {"A", "B", "C"}
+        assert group.link_methods == {"A": "exact", "B": "exact", "C": "vocabulary"}
+        assert group.method == "vocabulary"  # weakest link wins
+
+        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+        results = SchemaAnalyzer().analyze_entity_groups(schemas, groups)
+        inconsistencies = SchemaAnalyzer().generate_inconsistency_report(results)
+        pairs = {(i["source"], i["target"]) for i in inconsistencies}
+        assert ("C", "A") in pairs or ("A", "C") in pairs, (
+            f"C excluded from analysis: {pairs}"
+        )
+        provenance = inconsistencies[0]["entity_match"]
+        assert provenance["link_methods"]["C"] == "vocabulary"

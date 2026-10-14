@@ -308,8 +308,18 @@ class EntityMatcher:
                     if normalize_table_name(table) in synonyms:
                         chosen[system] = table
                         break
+            # Resolve an existing group EITHER by canonical name or by any
+            # of this entity's vocabulary aliases: an exact 'account' group
+            # (A.Account + B.Account) must be found when extending with a
+            # lone C.KUNNR, or C is silently stranded from analysis.
             existing = next(
-                (g for g in groups if g.canonical_name == canonical), None
+                (
+                    g
+                    for g in groups
+                    if g.canonical_name == canonical
+                    or g.canonical_name in synonyms
+                ),
+                None,
             )
             if existing is not None:
                 for system, table in chosen.items():

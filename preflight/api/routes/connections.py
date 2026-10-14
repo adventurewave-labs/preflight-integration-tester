@@ -37,10 +37,17 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
     resolve_connector_type,
 )
 
+    start = time.monotonic()
+    requested = connector_type or ""
+    # Resolve aliases the same way the pipeline runner does, so a connection
+    # that passes the API test is also accepted by a diagnostic run.
+    key = resolve_connector_type(requested) or requested.lower().strip()
+
     # Shared, fail-closed allowlist (see pipeline_runner.check_host_allowed):
     # enforced here AND on every diagnostic run, since the run is what opens
-    # connections and generates load.
-    allow_error = check_host_allowed(config or {})
+    # connections and generates load. Validates the connector's EFFECTIVE
+    # destination for the resolved type.
+    allow_error = check_host_allowed(config or {}, connector_type=key)
     if allow_error is not None:
         return {
             "status": "failed",
@@ -49,11 +56,6 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
             "connection_latency_ms": None,
         }
 
-    start = time.monotonic()
-    requested = connector_type or ""
-    # Resolve aliases the same way the pipeline runner does, so a connection
-    # that passes the API test is also accepted by a diagnostic run.
-    key = resolve_connector_type(requested) or requested.lower().strip()
     try:
         connector = create_connector(key, config or {}, timeout_seconds=10)
     except ValueError as exc:
