@@ -399,16 +399,22 @@ class TestRound4Fixes:
         }
         groups = EntityMatcher().build_entity_groups(schemas)
         customer_groups = [g for g in groups if g.canonical_name == "customer"]
-        assert len(customer_groups) == 2
+        # Since vocabulary groups extend same-name groups with per-link
+        # provenance, all four systems form ONE group.
+        assert len(customer_groups) == 1
+        group = customer_groups[0]
+        assert set(group.tables) == {"a", "b", "c", "d"}
+        assert group.link_methods["a"] == "exact"
+        assert group.link_methods["c"] == "vocabulary"
+        assert group.method == "vocabulary"  # weakest link
 
         analyzer = SchemaAnalyzer()
         results = analyzer.analyze_entity_groups(schemas, groups)
         inconsistencies = analyzer.generate_inconsistency_report(results)
-        # The exact pair (a vs b: email vs phone missing fields) AND the
-        # vocabulary pair (c vs d) must both contribute findings.
+        # Every system pair contributes findings — nothing dropped.
         pairs = {(i["source"], i["target"]) for i in inconsistencies}
-        assert ("a", "b") in pairs, f"exact-group findings dropped: {pairs}"
-        assert ("c", "d") in pairs, f"vocabulary-group findings dropped: {pairs}"
+        assert ("a", "b") in pairs, f"exact-pair findings dropped: {pairs}"
+        assert ("c", "d") in pairs, f"vocabulary-pair findings dropped: {pairs}"
 
     def test_field_overlap_first_wins_on_member_side(self):
         """s2 has two tables matching the anchor; the FIRST stays in the
@@ -990,7 +996,8 @@ class TestRound9Fixes:
             "d": {"KUNNR": _f("KUNNR", "NAME1")},
         }
         groups = EntityMatcher().build_entity_groups(schemas)
-        assert len([g for g in groups if g.canonical_name == "customer"]) == 2
+        # exact {a,b} + vocabulary {c,d} now merge into one customer group
+        assert len([g for g in groups if g.canonical_name == "customer"]) == 1
         analyzer = SchemaAnalyzer()
         results = analyzer.analyze_entity_groups(schemas, groups)
         inconsistencies = analyzer.generate_inconsistency_report(results)
@@ -1060,4 +1067,79 @@ class TestRound10Fixes:
         connections = [{"name": "demo", "connector_type": "mock", "config": {}}]
         payload = await pr.run_diagnostic(config, mock=False, connections=connections)
         assert payload["data_sources"] == {"demo": "mock"}
+        assert payload["pipeline_bottlenecks"] == []
+
+
+class TestRound11Fixes:
+    def test_exact_group_extended_by_vocabulary(self):
+        """A.customer + B.customer (exact) + C.Account: C must not be
+        silently excluded — it extends the group with vocabulary provenance."""
+        schemas = {
+            "A": {"customer": _f("id", "name")},
+            "B": {"customer": _f("id", "name", "email")},
+            "C": {"Account": _f("Id", "Name")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        customer = [g for g in groups if g.canonical_name == "customer"]
+        assert len(customer) == 1
+        assert set(customer[0].tables) == {"A", "B", "C"}
+        info = customer[0].as_match_info()
+        assert info["link_methods"] == {"A": "exact", "B": "exact", "C": "vocabulary"}
+
+    async def test_suffix_collision_with_caller_supplied_name(self):
+        from preflight.analysis import pipeline_runner as pr
+
+        connections = [
+            {"name": "prod", "connector_type": "mock", "config": {}},
+            {"name": "prod (2)", "connector_type": "mock", "config": {}},
+            {"name": "prod", "connector_type": "mock", "config": {}},
+        ]
+        inputs = await pr.collect_real_inputs(connections, {})
+        names = sorted(inputs.schemas)
+        assert len(names) == 3, names
+        assert "prod" in names and "prod (2)" in names
+        # the third got a free suffix, not an overwrite of prod (2)
+        third = [n for n in names if n not in ("prod", "prod (2)")]
+        assert third == ["prod (3)"], third
+
+    async def test_stress_failure_warning_reaches_payload(self):
+        from unittest.mock import patch
+        from preflight.analysis import pipeline_runner as pr
+        from preflight.analysis.pipeline_tester import PipelineTester
+
+        async def exploding(self, system_name, query_fn, scenario):
+            raise RuntimeError("boom at 10.0.0.9:5432")
+
+        class FakeRealConnector:  # name must NOT start with "Mock"
+            async def connect(self):
+                return True
+
+            async def get_metadata(self):
+                from preflight.core.infrastructure.connectors.base import (
+                    SystemMetadata,
+                )
+                return SystemMetadata(
+                    system_name="db", system_version="1", tables=[],
+                    entity_count=0, total_row_estimate=0, connection_latency_ms=1.0,
+                )
+
+            async def execute_read_query(self, q):
+                return None
+
+            async def disconnect(self):
+                pass
+
+        connections = [{"name": "db", "connector_type": "postgresql", "config": {}}]
+        config = {
+            "scenario": {"name": "t", "entities": []},
+            "analysis": {},  # stress enabled
+            "reporting": {},
+        }
+        with patch.object(pr, "create_connector", lambda *a, **k: FakeRealConnector()):
+            with patch.object(PipelineTester, "simulate_ai_agent_workload", exploding):
+                payload = await pr.run_diagnostic(
+                    config, mock=False, connections=connections
+                )
+        assert any("pipeline stress test failed" in w for w in payload["warnings"])
+        assert not any("10.0.0.9" in w for w in payload["warnings"])
         assert payload["pipeline_bottlenecks"] == []

@@ -222,6 +222,13 @@ async def collect_real_inputs(
             if name in seen_names or name in inputs.schemas:
                 seen_names[name] = seen_names.get(name, 1) + 1
                 new_name = f"{name} ({seen_names[name]})"
+                # The suffix itself may collide with a caller-supplied name
+                # ('prod', 'prod (2)', 'prod') — keep generating until free.
+                while new_name in inputs.schemas or any(
+                    new_name == c.get("name") for c in connections
+                ):
+                    seen_names[name] += 1
+                    new_name = f"{name} ({seen_names[name]})"
                 inputs.warnings.append(
                     f"duplicate connection name '{name}' — renamed to '{new_name}'"
                 )
@@ -513,6 +520,9 @@ async def run_diagnostic(
                 )
             else:
                 pipeline_results = []
+            # run_pipeline_tests appends failure warnings to inputs.warnings
+            # AFTER the earlier copy — refresh so they reach the payload.
+            warnings[:] = list(inputs.warnings)
             progress('pipeline', 'Pipeline test complete')
 
         # 3. Middleware analysis --------------------------------------------------

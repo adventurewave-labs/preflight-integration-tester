@@ -58,10 +58,23 @@ class EntityGroup:
     canonical_name: str
     tables: Dict[str, str] = field(default_factory=dict)  # system -> table name
     method: str = "exact"  # exact | declared | vocabulary | field_overlap
+    # How EACH system joined (weakest method wins for `method` above when
+    # a group mixes links, e.g. exact core + vocabulary extension).
+    link_methods: Dict[str, str] = field(default_factory=dict)
     confidence: float = 1.0
     # Internal bookkeeping for folding later attachments into `confidence`.
     _score_sum: float = 0.0
     _score_count: int = 0
+
+    _METHOD_STRENGTH = {"exact": 4, "declared": 3, "vocabulary": 2, "field_overlap": 1}
+
+    def note_link(self, system: str, method: str) -> None:
+        """Record how a system joined; the overall method is the weakest link."""
+        self.link_methods[system] = method
+        self.method = min(
+            (m for m in self.link_methods.values()),
+            key=lambda m: self._METHOD_STRENGTH.get(m, 0),
+        )
 
     def as_match_info(self) -> Dict:
         return {
@@ -69,6 +82,7 @@ class EntityGroup:
             "matched_tables": dict(self.tables),
             "method": self.method,
             "confidence": round(self.confidence, 3),
+            "link_methods": dict(self.link_methods) or None,
         }
 
 
@@ -234,15 +248,17 @@ class EntityMatcher:
                     assigned.add((system, table))
                     tables[system] = table  # one table per system, first wins
                     break
+
             if len(tables) >= 2:
-                groups.append(
-                    EntityGroup(
-                        canonical_name=norm_name,
-                        tables=tables,
-                        method="exact",
-                        confidence=1.0,
-                    )
+                exact_group = EntityGroup(
+                    canonical_name=norm_name,
+                    tables=tables,
+                    method="exact",
+                    confidence=1.0,
                 )
+                for system in tables:
+                    exact_group.note_link(system, "exact")
+                groups.append(exact_group)
 
         # 2. Declared entities from the scenario config.
         for entity in declared_entities or []:
@@ -279,7 +295,10 @@ class EntityMatcher:
                     )
                 )
 
-        # 3. Seed vocabulary groups.
+        # 3. Seed vocabulary groups. When a group with this canonical name
+        # already exists (e.g. an exact group over two systems), additional
+        # vocabulary-identified tables EXTEND it with per-link provenance
+        # instead of being silently excluded from analysis.
         for canonical, synonyms in SEED_VOCABULARY.items():
             chosen: Dict[str, str] = {}
             for system, tables in norm_tables.items():
@@ -289,17 +308,29 @@ class EntityMatcher:
                     if normalize_table_name(table) in synonyms:
                         chosen[system] = table
                         break
-            if len(chosen) >= 2:
+            existing = next(
+                (g for g in groups if g.canonical_name == canonical), None
+            )
+            if existing is not None:
+                for system, table in chosen.items():
+                    if system in existing.tables:
+                        continue
+                    existing.tables[system] = table
+                    existing.note_link(system, "vocabulary")
+                    existing.confidence = min(existing.confidence, 0.9)
+                    assigned.add((system, table))
+            elif len(chosen) >= 2:
+                vocab_group = EntityGroup(
+                    canonical_name=canonical,
+                    tables=chosen,
+                    method="vocabulary",
+                    confidence=0.9,
+                )
+                for system in chosen:
+                    vocab_group.note_link(system, "vocabulary")
                 for system, table in chosen.items():
                     assigned.add((system, table))
-                groups.append(
-                    EntityGroup(
-                        canonical_name=canonical,
-                        tables=chosen,
-                        method="vocabulary",
-                        confidence=0.9,
-                    )
-                )
+                groups.append(vocab_group)
 
         # 4. Field-overlap pairing for everything still unassigned.
         # Prefilter: only tables that share at least one EXACT normalized
