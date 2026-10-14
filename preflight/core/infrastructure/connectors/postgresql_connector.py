@@ -125,7 +125,11 @@ class PostgreSQLConnector(BaseConnector):
             val = config.get(cfg_key) or config.get(key)
             if val is not None:
                 parts.append(f"{key}={val}")
-        parts.append("options=-c default_transaction_read_only=on")
+        # Read-only is enforced at the session level in _sync_connect()
+        # (SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY).  Do NOT add
+        # an options=-c … fragment here: the unquoted space breaks libpq
+        # conninfo parsing and makes every real connection fail with
+        # 'invalid connection option "default_transaction_read_only"'.
         return " ".join(parts)
 
     def _run_sync(self, func, *args):
