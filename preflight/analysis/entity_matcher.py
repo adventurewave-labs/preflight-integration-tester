@@ -259,7 +259,7 @@ class EntityMatcher:
             for system, tables in norm_tables.items():
                 best_table, best_score = None, 0.0
                 for table, fields in tables.items():
-                    if (system, normalize_table_name(table)) in assigned:
+                    if (system, table) in assigned:
                         continue
                     score = self.field_overlap_score(declared_fields, fields)
                     if score > best_score:

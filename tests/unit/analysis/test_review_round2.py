@@ -714,3 +714,22 @@ class TestApiBusinessEntitiesShape:
         assert captured["entities"] == [
             {"name": "customer", "fields": ["id", "name"], "primary_system": None}
         ]
+
+
+class TestRound6Fixes:
+    def test_declared_pass_cannot_reclaim_exact_grouped_tables(self):
+        """Mixed key styles let the declared pass re-claim tables already in
+        an exact group, double-counting findings. Raw keys everywhere."""
+        schemas = {
+            "a": {"customer": _f("id", "name", "email")},
+            "b": {"customer": _f("id", "name", "email")},
+        }
+        declared = [{"name": "client", "fields": ["id", "name", "email"]}]
+        groups = EntityMatcher().build_entity_groups(schemas, declared)
+        exact = [g for g in groups if g.method == "exact"]
+        declared_groups = [g for g in groups if g.method == "declared"]
+        assert len(exact) == 1
+        assert declared_groups == [], (
+            "declared pass re-claimed tables already grouped by exact pass: "
+            + str([g.tables for g in declared_groups])
+        )
