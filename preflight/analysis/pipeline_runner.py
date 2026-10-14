@@ -164,8 +164,11 @@ async def collect_real_inputs(
                 connector = create_connector(
                     registry_type, conn.get('config') or {}, timeout_seconds=connect_timeout
                 )
-            except Exception as exc:  # pragma: no cover - defensive
-                inputs.warnings.append(f"{name}: connector creation failed: {exc}")
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("%s: connector creation failed", name, exc_info=True)
+                inputs.warnings.append(
+                    f"{name}: connector could not be created from the given config"
+                )
                 continue
 
             is_fallback = registry_type != 'mock' and type(connector).__name__.startswith('Mock')
@@ -191,7 +194,10 @@ async def collect_real_inputs(
             try:
                 meta = await asyncio.wait_for(connector.get_metadata(), timeout=connect_timeout * 2)
             except Exception as exc:
-                inputs.warnings.append(f"{name}: schema introspection failed: {exc}")
+                logger.warning("%s: schema introspection failed: %s", name, exc)
+                inputs.warnings.append(
+                    f"{name}: schema introspection failed (permissions or version)"
+                )
                 await _safe_disconnect(connector)
                 continue
 
