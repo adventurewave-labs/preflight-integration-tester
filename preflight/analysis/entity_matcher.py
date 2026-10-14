@@ -283,17 +283,40 @@ class EntityMatcher:
                 if best_table is not None and best_score >= self.group_field_threshold:
                     chosen[system] = best_table
                     scores.append(best_score)
-            if len(chosen) >= 2:
+            existing_declared = next(
+                (
+                    g
+                    for g in groups
+                    if g.canonical_name == normalize_table_name(name)
+                ),
+                None,
+            )
+            if existing_declared is not None:
+                # An exact/other group already carries this entity (e.g.
+                # A.invoice + B.invoice): attach the declared-matched
+                # tables to it instead of discarding a lone match.
+                for system, table in chosen.items():
+                    if system in existing_declared.tables:
+                        continue
+                    existing_declared.tables[system] = table
+                    existing_declared.note_link(system, "declared")
+                    existing_declared.confidence = min(
+                        existing_declared.confidence,
+                        (sum(scores) / len(scores)) if scores else 0.5,
+                    )
+                    assigned.add((system, table))
+            elif len(chosen) >= 2:
                 for system, table in chosen.items():
                     assigned.add((system, table))
-                groups.append(
-                    EntityGroup(
-                        canonical_name=name,
-                        tables=chosen,
-                        method="declared",
-                        confidence=sum(scores) / len(scores),
-                    )
+                declared_group = EntityGroup(
+                    canonical_name=name,
+                    tables=chosen,
+                    method="declared",
+                    confidence=(sum(scores) / len(scores)) if scores else 0.5,
                 )
+                for system in chosen:
+                    declared_group.note_link(system, "declared")
+                groups.append(declared_group)
 
         # 3. Seed vocabulary groups. When a group with this canonical name
         # already exists (e.g. an exact group over two systems), additional
@@ -308,19 +331,30 @@ class EntityMatcher:
                     if normalize_table_name(table) in synonyms:
                         chosen[system] = table
                         break
-            # Resolve an existing group EITHER by canonical name or by any
-            # of this entity's vocabulary aliases: an exact 'account' group
-            # (A.Account + B.Account) must be found when extending with a
-            # lone C.KUNNR, or C is silently stranded from analysis.
-            existing = next(
-                (
-                    g
-                    for g in groups
-                    if g.canonical_name == canonical
-                    or g.canonical_name in synonyms
-                ),
-                None,
-            )
+            # Resolve compatible existing groups through the canonical name
+            # OR any alias, and MERGE them when there are several: exact
+            # 'customer' (A+B) and exact 'account' (C+D) groups are the
+            # same business entity and must be analyzed together, not kept
+            # as parallel islands.
+            alias_names = {normalize_table_name(s) for s in synonyms}
+            alias_names.add(normalize_table_name(canonical))
+            compatible = [g for g in groups if g.canonical_name in alias_names]
+            existing = None
+            if compatible:
+                existing = compatible[0]
+                for other in compatible[1:]:
+                    for sys_name, table in other.tables.items():
+                        if sys_name in existing.tables:
+                            continue
+                        existing.tables[sys_name] = table
+                    for sys_name, method in other.link_methods.items():
+                        existing.link_methods.setdefault(sys_name, method)
+                    existing.confidence = min(existing.confidence, other.confidence)
+                    groups.remove(other)
+                existing.method = min(
+                    (m for m in existing.link_methods.values()),
+                    key=lambda m: EntityGroup._METHOD_STRENGTH.get(m, 0),
+                )
             if existing is not None:
                 for system, table in chosen.items():
                     if system in existing.tables:

@@ -91,7 +91,14 @@ def _host_from_url(raw: str) -> str:
     if "://" in candidate:
         from urllib.parse import urlparse
 
-        candidate = (urlparse(candidate).hostname or "").lower()
+        try:
+            candidate = (urlparse(candidate).hostname or "").lower()
+        except ValueError:
+            # Malformed URL (e.g. "https://[invalid"): no comparable host.
+            # Returning "" keeps validation fail-closed — "" matches no
+            # allowlist — instead of raising past the endpoint's
+            # structured error handling.
+            return ""
     return candidate
 
 

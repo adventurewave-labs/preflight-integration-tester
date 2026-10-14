@@ -1232,3 +1232,59 @@ class TestRound12OpenItems:
         )
         provenance = inconsistencies[0]["entity_match"]
         assert provenance["link_methods"]["C"] == "vocabulary"
+
+
+class TestRound13Fixes:
+    def test_compatible_alias_exact_groups_merge(self):
+        """A.customer+B.customer AND C.Account+D.Account: two exact groups
+        for the same business entity must merge (and E.KUNNR extend)."""
+        schemas = {
+            "A": {"customer": _f("id", "name")},
+            "B": {"customer": _f("id", "name", "email")},
+            "C": {"Account": _f("Id", "Name")},
+            "D": {"Account": _f("Id", "Name", "Phone")},
+            "E": {"KUNNR": _f("KUNNR", "NAME1")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        assert len(groups) == 1
+        assert set(groups[0].tables) == {"A", "B", "C", "D", "E"}
+        assert groups[0].link_methods["A"] == "exact"
+        assert groups[0].link_methods["E"] == "vocabulary"
+        # all four exact members analyzed together now
+        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+        results = SchemaAnalyzer().analyze_entity_groups(schemas, groups)
+        incons = SchemaAnalyzer().generate_inconsistency_report(results)
+        pairs = {(i["source"], i["target"]) for i in incons}
+        cross = [p for p in pairs if {p[0], p[1]} == {"A", "C"} or {p[0], p[1]} == {"B", "D"}]
+        assert cross, f"cross-group pairs missing: {pairs}"
+
+    def test_declared_attaches_to_existing_exact_group(self):
+        schemas = {
+            "A": {"invoice": _f("invoice_num", "amount")},
+            "B": {"invoice": _f("invoice_num", "amount", "date")},
+            "C": {"legacy_billing": _f("invoice_num", "amount", "currency")},
+        }
+        declared = [{"name": "invoice", "fields": ["invoice_num", "amount"]}]
+        groups = EntityMatcher().build_entity_groups(schemas, declared)
+        assert len(groups) == 1
+        assert set(groups[0].tables) == {"A", "B", "C"}
+        assert groups[0].link_methods == {"A": "exact", "B": "exact", "C": "declared"}
+
+    async def test_malformed_host_url_structured_failure(self, monkeypatch):
+        """A malformed destination URL must fail closed with a structured
+        error, never raise past validation (both enforcement points)."""
+        from preflight.analysis.pipeline_runner import check_host_allowed
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
+        result = check_host_allowed(
+            {"host": "https://[invalid"}, connector_type="postgresql"
+        )
+        assert result is not None  # blocked, not raised
+        assert "not in the allowed hosts list" in result
+
+        from preflight.api.routes.connections import _test_connection
+        api_result = await _test_connection(
+            "postgresql", {"host": "https://[invalid"}
+        )
+        assert api_result["status"] == "failed"
+        assert "allowed hosts list" in api_result["error_message"]
