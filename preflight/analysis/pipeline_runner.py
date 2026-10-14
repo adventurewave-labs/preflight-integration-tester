@@ -120,6 +120,10 @@ class ConnectedSystem:
     connector_type: str
     connector: Any
     is_mock_fallback: bool = False
+    # Type declared by the caller (API system_type), preferred over the
+    # connector-type-derived default: a Postgres-stored ERP replica should
+    # be analyzed as ERP, not DATABASE.
+    declared_type: Optional[str] = None
 
 
 @dataclass
@@ -133,7 +137,8 @@ class RealInputs:
         return [
             {
                 "name": s.name,
-                "type": SYSTEM_TYPE_MAP.get(s.connector_type, s.connector_type.upper()),
+                "type": s.declared_type
+                or SYSTEM_TYPE_MAP.get(s.connector_type, s.connector_type.upper()),
             }
             for s in self.systems
         ]
@@ -232,6 +237,7 @@ async def collect_real_inputs(
             if allow_error is not None:
                 inputs.warnings.append(f"{name}: skipped — {allow_error}")
                 continue
+            declared_type = conn.get('system_type')
             try:
                 connector = create_connector(
                     registry_type, conn.get('config') or {}, timeout_seconds=connect_timeout
@@ -287,7 +293,7 @@ async def collect_real_inputs(
 
             system = ConnectedSystem(
                 name=name, connector_type=registry_type, connector=connector,
-                is_mock_fallback=is_fallback,
+                is_mock_fallback=is_fallback, declared_type=declared_type,
             )
             inputs.systems.append(system)
             inputs.schemas[name] = {
@@ -364,7 +370,9 @@ async def run_pipeline_tests(
     duration = duration_seconds or 10
 
     for system in inputs.systems:
-        if system.is_mock_fallback:
+        if system.is_mock_fallback or system.connector_type == "mock":
+            # Synthetic latency tells us nothing, whichever way the mock
+            # arrived (explicit choice or missing client library).
             continue
         connector = system.connector
         probe_sql = _STRESS_PROBE_SQL.get(system.connector_type, "SELECT 1")
@@ -556,7 +564,14 @@ async def run_diagnostic(
             # data, so reports can say when a 'real' score mixes synthetic
             # schemas.
             'data_sources': (
-                {s.name: ('mock' if s.is_mock_fallback else 'real') for s in inputs.systems}
+                {
+                    s.name: (
+                        'mock'
+                        if (s.is_mock_fallback or s.connector_type == 'mock')
+                        else 'real'
+                    )
+                    for s in inputs.systems
+                }
                 if inputs else {}
             ),
         }

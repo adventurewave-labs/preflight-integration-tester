@@ -1018,3 +1018,46 @@ class TestRound9Fixes:
         matcher2 = EntityMatcher()
         matcher2.build_entity_groups(small)
         assert matcher2.matching_was_capped is False
+
+
+class TestRound10Fixes:
+    async def test_caller_declared_system_type_preferred(self):
+        from preflight.analysis import pipeline_runner as pr
+
+        connections = [
+            {"name": "erp_replica", "connector_type": "postgresql",
+             "system_type": "ERP", "config": {}},
+            {"name": "plain_db", "connector_type": "mock",
+             "system_type": None, "config": {}},
+        ]
+        real_factory = pr.create_connector
+
+        def factory(ctype, config, **kw):
+            if ctype == "postgresql":
+                from preflight.core.infrastructure.connectors.mock_connector import (
+                    MockEnterpriseConnector,
+                )
+                return MockEnterpriseConnector(config)
+            return real_factory(ctype, config, **kw)
+
+        import unittest.mock as mock
+        with mock.patch.object(pr, "create_connector", factory):
+            inputs = await pr.collect_real_inputs(connections, {})
+        summaries = {s["name"]: s["type"] for s in inputs.connection_summaries()}
+        assert summaries["erp_replica"] == "ERP"
+        # undeclared mock derives to its own upper-cased type; a caller
+        # CAN override it via system_type now
+        assert summaries["plain_db"] == "MOCK"
+
+    async def test_explicit_mock_labeled_mock_in_data_sources(self):
+        from preflight.analysis import pipeline_runner as pr
+
+        config = {
+            "scenario": {"name": "t", "entities": []},
+            "analysis": {},  # stress enabled — must be skipped for mock
+            "reporting": {},
+        }
+        connections = [{"name": "demo", "connector_type": "mock", "config": {}}]
+        payload = await pr.run_diagnostic(config, mock=False, connections=connections)
+        assert payload["data_sources"] == {"demo": "mock"}
+        assert payload["pipeline_bottlenecks"] == []

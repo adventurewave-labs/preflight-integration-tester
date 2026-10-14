@@ -65,6 +65,7 @@ async def _run_diagnostic(
                     {
                         "name": conn["name"],
                         "connector_type": conn["connector_type"],
+                        "system_type": conn.get("system_type"),
                         "config": conn.get("config") or {},
                     }
                 )
