@@ -1,8 +1,9 @@
 """
 Connection management endpoints.
 """
-import uuid
+import asyncio
 import time
+import uuid
 from typing import Dict, Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,38 +13,85 @@ from preflight.api.schemas import (
     CreateConnectionRequest,
 )
 from preflight.api.dependencies import get_connections_store
+from preflight.core.infrastructure.connectors.connector_factory import (
+    create_connector,
+)
 
 router = APIRouter()
 
 
-def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Attempt to connect to the system and return connection metadata.
+async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Connect to the system for real and return measured connection metadata.
 
-    For mock/unknown connectors this always succeeds.  Real connectors would
-    attempt an actual handshake here.
+    Uses the connector registry (postgresql, salesforce, snowflake, mock, …).
+    Connectors whose client library is missing fall back to their mock
+    implementation, reported via ``error_message`` so callers know the entity
+    counts come from synthetic data.  Credentials ARE validated: a failed
+    handshake returns ``status="failed"`` with the error message.
     """
     start = time.monotonic()
+    key = (connector_type or "").lower().strip()
+    try:
+        connector = create_connector(key, config or {}, timeout_seconds=10)
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "error_message": str(exc),
+            "entity_count": 0,
+            "connection_latency_ms": None,
+        }
 
-    if connector_type == "mock":
-        latency_ms = 12.0
-        entity_count = 42
-        status_val = "connected"
-        error_message = None
-    else:
-        # For non-mock connectors we attempt a lightweight probe using the
-        # connector infrastructure when available, otherwise mark as
-        # 'connected' optimistically (credentials are not validated here).
-        latency_ms = round((time.monotonic() - start) * 1000 + 5.0, 2)
-        entity_count = 0
-        status_val = "connected"
-        error_message = None
+    is_fallback = key != "mock" and type(connector).__name__.startswith("Mock")
+    try:
+        connected = await asyncio.wait_for(connector.connect(), timeout=10)
+    except Exception as exc:
+        await _safe_disconnect(connector)
+        return {
+            "status": "failed",
+            "error_message": f"connection failed: {exc}",
+            "entity_count": 0,
+            "connection_latency_ms": None,
+        }
+    if not connected:
+        await _safe_disconnect(connector)
+        return {
+            "status": "failed",
+            "error_message": "connection handshake failed",
+            "entity_count": 0,
+            "connection_latency_ms": None,
+        }
 
+    latency_ms = 0.0
+    entity_count = 0
+    try:
+        latency_ms = await asyncio.wait_for(connector.ping(), timeout=10)
+        meta = await asyncio.wait_for(connector.get_metadata(), timeout=20)
+        entity_count = meta.entity_count
+    except Exception:
+        pass  # latency/entity count are best-effort; connection itself worked
+    await _safe_disconnect(connector)
+
+    error_message = None
+    if is_fallback:
+        error_message = (
+            f"client library for '{key}' not installed — mock fallback used; "
+            f"credentials were NOT validated"
+        )
     return {
-        "status": status_val,
+        "status": "connected",
         "error_message": error_message,
         "entity_count": entity_count,
-        "connection_latency_ms": latency_ms,
+        "connection_latency_ms": round(latency_ms, 2) if latency_ms else round(
+            (time.monotonic() - start) * 1000, 2
+        ),
     }
+
+
+async def _safe_disconnect(connector) -> None:
+    try:
+        await connector.disconnect()
+    except Exception:
+        pass
 
 
 @router.post(
@@ -59,7 +107,7 @@ async def create_connection(
     """Create a read-only connection to an enterprise system and run a connectivity test."""
     conn_id = str(uuid.uuid4())
 
-    probe = _test_connection(request.connector_type, request.config)
+    probe = await _test_connection(request.connector_type, request.config)
 
     record = {
         "id": conn_id,
@@ -143,7 +191,7 @@ async def test_connection(
             detail=f"Connection '{connection_id}' not found.",
         )
 
-    probe = _test_connection(record["connector_type"], record.get("config", {}))
+    probe = await _test_connection(record["connector_type"], record.get("config", {}))
     record.update(probe)
 
     return ConnectionResponse(**{k: v for k, v in record.items() if k != "config"})

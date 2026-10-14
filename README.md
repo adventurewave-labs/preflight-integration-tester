@@ -13,7 +13,7 @@
 
 A real, unedited terminal recording of `preflight run --config config.example.yml --mock` (installed via `pip install -e .`) — this GIF is not a mockup or a scripted animation. The CLI's `run` command ships with a built-in demo dataset (synthetic Salesforce Account/Contact records vs. SAP KUNNR/VBELN records, with a deliberate entity mismatch) so it runs safely with zero configuration and no live credentials. Everything downstream of that dataset is the genuine analysis pipeline: `SchemaAnalyzer`, `MiddlewareAnalyzer`, `ReadinessCalculator`, and the Jinja2-based `HTMLReporter`, writing real report files to `./reports/`.
 
-This run scores **97.0% — GO** and flags 3 real middleware gaps (API gateway, semantic layer, REST API integration) with a 12–18 week remediation estimate. Point `config.yml` at real ERP/CRM/warehouse credentials (see [Quick Start](#quick-start)) to get a score for your actual environment instead of the demo data.
+This run scores **97.0% — GO** and flags 3 real middleware gaps (API gateway, semantic layer, REST API integration) with a 12–18 week remediation estimate. Point `config.yml` at real ERP/CRM/warehouse credentials (see [Quick Start](#quick-start)) to get a score for your actual environment instead of the demo data: the CLI and API connect through the real (read-only) connectors, introspect live schemas, cross-match business entities across differently-named tables (Salesforce `Account` vs SAP `KUNNR`, see [ADR-011](./docs/adr/ADR-011-cross-system-entity-matching.md)), and stress-test the connected systems with your scenario's query load. The `--mock` run above is a frozen dataset + frozen analysis so the numbers in this README stay reproducible; real runs report their own, environment-derived results.
 
 ## What is Pilot Purgatory?
 
@@ -103,12 +103,14 @@ Estimated Remediation: 8-12 weeks
 
 ## 🛠️ Technology Stack
 
-- **Core Engine**: Python (data analysis, schema mapping)
-- **Connectors**: Enterprise SDKs and REST APIs
-- **Frontend**: React dashboard with D3.js visualizations
-- **Database**: PostgreSQL with time-series extensions
+- **Core Engine**: Python (data analysis, schema mapping, cross-system entity matching)
+- **Connectors**: Enterprise SDKs and REST APIs (Salesforce, Snowflake, PostgreSQL today; mock fallbacks when client libraries are absent)
+- **API**: FastAPI service + CLI (`preflight` command), sharing one diagnostic pipeline
 - **Deployment**: Docker/Kubernetes, VPC-ready
-- **Security**: OAuth2, least-privilege access, encryption
+- **Security**: read-only connectors (SELECT-only + session-level `READ ONLY`), API-key auth; OAuth2 planned
+
+> A React/D3 dashboard and time-series storage are design goals, not shipped
+> code — the reporting engine today is a self-contained Jinja2 HTML report.
 
 ## 💼 Target Customers
 
@@ -142,15 +144,20 @@ docker --version
 git clone https://github.com/adventurewave-labs/preflight-integration-tester.git
 cd preflight-integration-tester
 
-# Install dependencies
+# Install (editable install gives you the `preflight` command)
 pip install -r requirements.txt
+pip install -e .
 
 # Configure enterprise connections
 cp config.example.yml config.yml
-# Edit config.yml with your system credentials
+# Edit config.yml: set enabled: true on the systems you want analyzed
+# (postgresql and salesforce client libraries install by default;
+#  for snowflake, uncomment snowflake-connector-python in requirements.txt)
 
-# Run diagnostic
-python preflight.py run --config config.yml
+# Run diagnostic against your systems (read-only)
+preflight run --config config.yml
+# …or the zero-config demo
+preflight run --config config.example.yml --mock
 
 # View report
 open reports/readiness-assessment.html

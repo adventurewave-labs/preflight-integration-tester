@@ -31,6 +31,10 @@ class EntityComparisonResult:
     missing_in_target: List[str] = field(default_factory=list)
     type_mismatches: List[Tuple[str, str, str]] = field(default_factory=list)  # (field, src_type, tgt_type)
     overall_similarity: float = 0.0
+    # Set when the comparison came from cross-name entity matching
+    # (see EntityMatcher / analyze_entity_groups): describes how the two
+    # tables were linked, e.g. {"method": "vocabulary", "confidence": 0.9}.
+    entity_match: Optional[Dict] = None
 
 class SchemaAnalyzer:
     """Analyzes schema consistency across multiple enterprise systems.
@@ -69,10 +73,17 @@ class SchemaAnalyzer:
         }
 
     def normalize_field_name(self, name: str) -> str:
-        """Normalize field name for comparison (snake_case, lowercase). Cached."""
+        """Normalize field name for comparison (snake_case, lowercase). Cached.
+
+        Handles both camelCase (AnnualRevenue → annual_revenue) and ERP
+        all-caps conventions (NAME1 → name1, KUNNR → kunnr) so that SAP-style
+        field names compare sensibly against CRM field names.
+        """
         if name in self._norm_cache:
             return self._norm_cache[name]
-        normalized = re.sub(r'([A-Z])', r'_\1', name).lower()
+        normalized = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', name)  # XMLHttp → XML_Http
+        normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', normalized)  # camel boundary
+        normalized = normalized.lower()
         normalized = re.sub(r'[^a-z0-9]', '_', normalized)
         normalized = re.sub(r'_+', '_', normalized).strip('_')
         self._norm_cache[name] = normalized
@@ -247,12 +258,44 @@ class SchemaAnalyzer:
 
         return results
 
+    def analyze_entity_groups(
+        self,
+        system_schemas: Dict[str, Dict[str, List[Dict]]],
+        entity_groups: List,
+    ) -> Dict:
+        """Analyze cross-name entity groups produced by :class:`EntityMatcher`.
+
+        Each group renames its member tables to the group's canonical entity
+        name, then the normal comparison logic runs over the renamed view.
+        The group itself is attached to every comparison result as
+        ``entity_match`` so reports can say *how* the tables were linked.
+        """
+        from preflight.analysis.entity_matcher import EntityGroup  # noqa: F401  (type hint)
+
+        results: Dict = {}
+        for group in entity_groups:
+            entity_schemas: Dict[str, List[Dict]] = {}
+            for system, table in group.tables.items():
+                fields = system_schemas.get(system, {}).get(table)
+                if fields:
+                    entity_schemas[system] = fields
+            if len(entity_schemas) < 2:
+                continue
+            comparisons = self.compare_entity_across_systems(
+                group.canonical_name, entity_schemas
+            )
+            for comp in comparisons:
+                comp.entity_match = group.as_match_info()
+            results[group.canonical_name] = comparisons
+        return results
+
     def generate_inconsistency_report(self, analysis_results: Dict) -> List[Dict]:
         """Generate a list of inconsistencies sorted by severity."""
         inconsistencies = []
 
         for entity_name, comparisons in analysis_results.items():
             for comp in comparisons:
+                match_info = getattr(comp, "entity_match", None)
                 # Missing fields
                 for field in comp.missing_in_target:
                     inconsistencies.append({
@@ -262,6 +305,7 @@ class SchemaAnalyzer:
                         'source': comp.source_system,
                         'target': comp.target_system,
                         'detail': f"Field '{field}' present in {comp.source_system} but missing in {comp.target_system}",
+                        'entity_match': match_info,
                     })
 
                 # Type mismatches
@@ -273,6 +317,7 @@ class SchemaAnalyzer:
                         'source': comp.source_system,
                         'target': comp.target_system,
                         'detail': f"Field '{field}': {src_type} in {comp.source_system} vs {tgt_type} in {comp.target_system}",
+                        'entity_match': match_info,
                     })
 
                 # Key mismatches (special case for id fields)
@@ -287,6 +332,7 @@ class SchemaAnalyzer:
                             'source': comp.source_system,
                             'target': comp.target_system,
                             'detail': f"Key fields differ: {id_fields_src} vs {id_fields_tgt}",
+                            'entity_match': match_info,
                         })
 
         # Sort by severity
