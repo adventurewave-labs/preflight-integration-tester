@@ -1288,3 +1288,40 @@ class TestRound13Fixes:
         )
         assert api_result["status"] == "failed"
         assert "allowed hosts list" in api_result["error_message"]
+
+
+class TestRound14Fixes:
+    def test_overlapping_alias_groups_not_lossy_merged(self):
+        """A and B each have BOTH customer and Account: merging the two
+        exact islands would drop a table per shared system. Both islands
+        must survive with all their comparisons."""
+        schemas = {
+            "A": {"customer": _f("id", "name", "email"),
+                  "Account": _f("id", "name", "phone")},
+            "B": {"customer": _f("id", "name", "phone"),
+                  "Account": _f("id", "name", "email")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        assert len(groups) == 2, [(g.canonical_name, g.tables) for g in groups]
+        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+        results = SchemaAnalyzer().analyze_entity_groups(schemas, groups)
+        incons = SchemaAnalyzer().generate_inconsistency_report(results)
+        pairs = {(i["source"], i["target"]) for i in incons}
+        assert ("A", "B") in pairs  # both islands still compare A vs B
+
+    def test_disjoint_alias_merge_records_vocabulary_join(self):
+        """Without an extra vocabulary table, the merged group must still
+        report the JOIN as vocabulary-strength, not exact/1.0."""
+        schemas = {
+            "A": {"customer": _f("id", "name")},
+            "B": {"customer": _f("id", "name", "email")},
+            "C": {"Account": _f("Id", "Name")},
+            "D": {"Account": _f("Id", "Name", "Phone")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        assert len(groups) == 1
+        group = groups[0]
+        assert group.method == "vocabulary"  # the join is an inference
+        assert group.confidence == 0.9
+        assert group.link_methods == {"A": "exact", "B": "exact",
+                                      "C": "exact", "D": "exact"}

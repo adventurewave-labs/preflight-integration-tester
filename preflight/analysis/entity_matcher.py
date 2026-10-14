@@ -342,19 +342,38 @@ class EntityMatcher:
             existing = None
             if compatible:
                 existing = compatible[0]
+                merged_any = False
                 for other in compatible[1:]:
+                    if set(other.tables) & set(existing.tables):
+                        # Overlapping systems: the one-table-per-system
+                        # contract makes a merge lossy (a shared system's
+                        # table in `other` would be dropped while its group
+                        # disappears). Keep both as separate islands so
+                        # every table keeps its cross-system comparisons.
+                        continue
                     for sys_name, table in other.tables.items():
-                        if sys_name in existing.tables:
-                            continue
                         existing.tables[sys_name] = table
                     for sys_name, method in other.link_methods.items():
                         existing.link_methods.setdefault(sys_name, method)
+                    existing._score_sum += other._score_sum
+                    existing._score_count += other._score_count
                     existing.confidence = min(existing.confidence, other.confidence)
                     groups.remove(other)
+                    merged_any = True
                 existing.method = min(
                     (m for m in existing.link_methods.values()),
                     key=lambda m: EntityGroup._METHOD_STRENGTH.get(m, 0),
                 )
+                if merged_any:
+                    # The join between groups is itself a vocabulary
+                    # inference: even two exact islands linked only by
+                    # alias knowledge must not report method='exact' /
+                    # confidence=1.0 for the whole group.
+                    existing.method = min(
+                        (existing.method, "vocabulary"),
+                        key=lambda m: EntityGroup._METHOD_STRENGTH.get(m, 0),
+                    )
+                    existing.confidence = min(existing.confidence, 0.9)
             if existing is not None:
                 for system, table in chosen.items():
                     if system in existing.tables:
