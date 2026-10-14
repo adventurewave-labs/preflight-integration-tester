@@ -207,9 +207,20 @@ async def collect_real_inputs(
     inputs = RealInputs(declared_entities=scenario.get('entities') or [])
     supported = set(list_connector_types())
 
+    seen_names: Dict[str, int] = {}
     try:
         for conn in connections:
             name = conn.get('name') or conn.get('connector_type', 'system')
+            # Duplicate names would silently overwrite each other's schemas
+            # and data_sources entries (API connection names are
+            # user-supplied and not unique) — deduplicate with a suffix.
+            if name in seen_names or name in inputs.schemas:
+                seen_names[name] = seen_names.get(name, 1) + 1
+                new_name = f"{name} ({seen_names[name]})"
+                inputs.warnings.append(
+                    f"duplicate connection name '{name}' — renamed to '{new_name}'"
+                )
+                name = new_name
             registry_type = resolve_connector_type(conn.get('connector_type') or '')
             if registry_type is None or registry_type not in supported:
                 inputs.warnings.append(
@@ -239,28 +250,40 @@ async def collect_real_inputs(
                     f"using MOCK data for this system"
                 )
             try:
-                connected = await asyncio.wait_for(connector.connect(), timeout=connect_timeout)
-            except Exception as exc:
-                logger.warning("%s: connection failed: %s", name, exc)
-                inputs.warnings.append(
-                    f"{name}: connection failed (check host/credentials)"
-                )
-                await _safe_disconnect(connector)
-                continue
-            if not connected:
-                inputs.warnings.append(f"{name}: connection failed")
-                await _safe_disconnect(connector)
-                continue
+                try:
+                    connected = await asyncio.wait_for(
+                        connector.connect(), timeout=connect_timeout
+                    )
+                except Exception as exc:
+                    logger.warning("%s: connection failed: %s", name, exc)
+                    inputs.warnings.append(
+                        f"{name}: connection failed (check host/credentials)"
+                    )
+                    await _safe_disconnect(connector)
+                    continue
+                if not connected:
+                    inputs.warnings.append(f"{name}: connection failed")
+                    await _safe_disconnect(connector)
+                    continue
 
-            try:
-                meta = await asyncio.wait_for(connector.get_metadata(), timeout=connect_timeout * 2)
-            except Exception as exc:
-                logger.warning("%s: schema introspection failed: %s", name, exc)
-                inputs.warnings.append(
-                    f"{name}: schema introspection failed (permissions or version)"
-                )
+                try:
+                    meta = await asyncio.wait_for(
+                        connector.get_metadata(), timeout=connect_timeout * 2
+                    )
+                except Exception as exc:
+                    logger.warning("%s: schema introspection failed: %s", name, exc)
+                    inputs.warnings.append(
+                        f"{name}: schema introspection failed (permissions or version)"
+                    )
+                    await _safe_disconnect(connector)
+                    continue
+            except BaseException:
+                # The IN-FLIGHT connector (connected but not yet collected)
+                # must be disconnected on cancellation too — the outer
+                # handler only sees systems already appended to
+                # inputs.systems.
                 await _safe_disconnect(connector)
-                continue
+                raise
 
             system = ConnectedSystem(
                 name=name, connector_type=registry_type, connector=connector,
@@ -465,6 +488,11 @@ async def run_diagnostic(
             groups = await asyncio.to_thread(
                 matcher.build_entity_groups, schemas, scenario.get('entities') or []
             )
+            if getattr(matcher, "matching_was_capped", False):
+                warnings.append(
+                    "schema matching was PARTIAL: the number of tables exceeded "
+                    "the field-overlap budget; findings may be incomplete"
+                )
             entity_matches = [g.as_match_info() for g in groups]
             schema_results = analyzer.analyze_entity_groups(schemas, groups)
             inconsistencies = analyzer.generate_inconsistency_report(schema_results)

@@ -692,6 +692,42 @@ class TestCancellationCleanup:
         assert "fast" in disconnects, (
             "cancellation must disconnect already-connected systems"
         )
+        assert "called" in disconnects, (
+            "cancellation must disconnect the IN-FLIGHT connector too"
+        )
+
+    async def test_cancel_during_introspection_disconnects(self, monkeypatch):
+        """Connected, cancelled inside get_metadata(): the per-connector
+        guard must disconnect it even though it never reached
+        inputs.systems."""
+        from preflight.analysis import pipeline_runner as pr
+
+        disconnects = []
+
+        class ConnectedThenStuck:
+            async def connect(self):
+                return True
+
+            async def get_metadata(self):
+                await asyncio.sleep(30)
+
+            async def disconnect(self):
+                disconnects.append("stuck")
+
+        monkeypatch.setattr(
+            pr, "create_connector", lambda *a, **k: ConnectedThenStuck()
+        )
+        connections = [{"name": "x", "connector_type": "postgresql", "config": {}}]
+        task = asyncio.get_event_loop().create_task(
+            pr.collect_real_inputs(connections, {})
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert disconnects == ["stuck"]
 
 
 class TestApiBusinessEntitiesShape:
@@ -894,19 +930,91 @@ class TestRound8Fixes:
         ) is not None  # salesforce domain not in list
         assert check_host_allowed({"host": "db.internal"}) is None
 
-    def test_data_sources_reach_cli_and_api_reports(self):
-        """The documented data_sources map must survive both payloads."""
+    async def test_data_sources_reach_runner_and_reports(self):
+        """End-to-end: a Mock-named connector under a real type is reported
+        as mock in data_sources, and both report payloads carry it through."""
+        from unittest.mock import patch
+        from preflight.analysis import pipeline_runner as pr
+        from preflight.core.infrastructure.connectors.mock_connector import (
+            MockEnterpriseConnector,
+        )
+
+        connections = [
+            {"name": "sf", "connector_type": "salesforce", "config": {}},
+        ]
+        config = {
+            "scenario": {"name": "t", "entities": []},
+            "analysis": {"pipeline_stress_test": {"enabled": False}},
+            "reporting": {},
+        }
+        with patch.object(
+            pr, "create_connector", lambda *a, **k: MockEnterpriseConnector({})
+        ):
+            payload = await pr.run_diagnostic(config, mock=False, connections=connections)
+        assert payload["data_sources"] == {"sf": "mock"}, payload["data_sources"]
+
+        # CLI mapping carries it through (report_data mirrors the payload)
+        from preflight.cli import main as cli_main
+        import inspect
+        source = inspect.getsource(cli_main)
+        assert "'data_sources': payload.get('data_sources')" in source
+        # API payload carries it through
+        from preflight.api.routes import diagnostics as diag_route
+        source2 = inspect.getsource(diag_route)
+        assert '"data_sources": payload.get("data_sources")' in source2
+
+
+class TestRound9Fixes:
+    async def test_duplicate_connection_names_deduplicated(self):
         from preflight.analysis import pipeline_runner as pr
 
-        # CLI: report_data keys mirror the runner payload; asserted at the
-        # runner level plus the CLI mapping below.
-        payload = {
-            "data_sources": {"erp": "real", "crm": "mock"},
-        }
-        assert payload["data_sources"]["crm"] == "mock"
+        connections = [
+            {"name": "prod", "connector_type": "mock", "config": {}},
+            {"name": "prod", "connector_type": "mock", "config": {}},
+        ]
+        inputs = await pr.collect_real_inputs(connections, {})
+        assert len(inputs.systems) == 2
+        assert sorted(inputs.schemas) == ["prod", "prod (2)"]
+        assert any("duplicate connection name" in w for w in inputs.warnings)
 
-        # API: report_payload includes data_sources from the runner payload
-        # (mapping is a straight passthrough; verified by code path test).
-        from preflight.api.routes import diagnostics as diag_route
-        source = open(diag_route.__file__).read()
-        assert '"data_sources": payload.get("data_sources")' in source
+    async def test_entity_name_not_disambiguated_key(self):
+        """Two same-canonical-name groups: findings report 'customer',
+        never 'customer#2'."""
+        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+        from preflight.analysis.entity_matcher import EntityMatcher
+
+        schemas = {
+            "a": {"customer": _f("id", "name", "email")},
+            "b": {"customers": _f("id", "name", "phone")},
+            "c": {"Account": _f("Id", "Name")},
+            "d": {"KUNNR": _f("KUNNR", "NAME1")},
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        assert len([g for g in groups if g.canonical_name == "customer"]) == 2
+        analyzer = SchemaAnalyzer()
+        results = analyzer.analyze_entity_groups(schemas, groups)
+        inconsistencies = analyzer.generate_inconsistency_report(results)
+        entities = {i["entity"] for i in inconsistencies}
+        assert entities == {"customer"}, entities
+        assert not any("#" in e for e in entities)
+
+    def test_cap_skip_surfaces_payload_warning(self):
+        """Over-budget matching must say so in warnings, not just INFO."""
+        from preflight.analysis.entity_matcher import EntityMatcher
+
+        schemas = {
+            sys_name: {f"{sys_name}_t{i}": _f("id", "name")
+                       for i in range(300)}
+            for sys_name in ("a", "b")
+        }
+        matcher = EntityMatcher(max_field_overlap_candidates=10)
+        matcher.build_entity_groups(schemas)
+        assert matcher.matching_was_capped is True
+        # under budget -> False
+        small = {
+            "a": {"orders": _f("id", "amount")},
+            "b": {"orders_legacy": _f("id", "amount")},
+        }
+        matcher2 = EntityMatcher()
+        matcher2.build_entity_groups(small)
+        assert matcher2.matching_was_capped is False

@@ -310,7 +310,7 @@ class SchemaAnalyzer:
                 # Missing fields
                 for field in comp.missing_in_target:
                     inconsistencies.append({
-                        'entity': entity_name,
+                        'entity': comparisons[0].entity_name,
                         'type': 'missing_field',
                         'severity': 'HIGH',
                         'source': comp.source_system,
@@ -322,7 +322,7 @@ class SchemaAnalyzer:
                 # Type mismatches
                 for field, src_type, tgt_type in comp.type_mismatches:
                     inconsistencies.append({
-                        'entity': entity_name,
+                        'entity': comparisons[0].entity_name,
                         'type': 'type_mismatch',
                         'severity': 'MEDIUM',
                         'source': comp.source_system,
@@ -337,7 +337,7 @@ class SchemaAnalyzer:
                 if id_fields_src and id_fields_tgt:
                     if set(id_fields_src) != set(id_fields_tgt):
                         inconsistencies.append({
-                            'entity': entity_name,
+                            'entity': comparisons[0].entity_name,
                             'type': 'key_mismatch',
                             'severity': 'CRITICAL',
                             'source': comp.source_system,

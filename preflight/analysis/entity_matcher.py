@@ -313,6 +313,9 @@ class EntityMatcher:
             for table, fields in tables.items()
             if (system, table) not in assigned
         ]
+        # Reset per call: callers (the runner) read this to warn that the
+        # resulting match set — and therefore the findings — are partial.
+        self.matching_was_capped = False
         if len(unassigned) > self.max_field_overlap_candidates:
             logger.info(
                 "Entity matching: %d unassigned tables exceed the "
@@ -320,6 +323,7 @@ class EntityMatcher:
                 len(unassigned),
                 self.max_field_overlap_candidates,
             )
+            self.matching_was_capped = True
             unassigned = []
         norm_field_sets = {
             (system, table): {self._norm_field(f) for f in fields}
