@@ -375,32 +375,42 @@ class EntityMatcher:
         # 0.35-overlap score to a vocabulary/declared/exact group would
         # mislabel the provenance of every finding from that table (ADR-011:
         # method + confidence must state how the link was actually made).
-        for system, tables in norm_tables.items():
-            for table, fields in tables.items():
-                key = (system, table)
-                if key in assigned or key in used:
+        # Bounded like step 4: only the (post-cap, prefilter-surviving)
+        # `unassigned` candidates are considered, and a member is only
+        # fuzzy-scored when it shares >= 1 exact normalized field with the
+        # candidate.
+        all_norm_sets = {
+            (system, table): {self._norm_field(f) for f in fields}
+            for system, tables in norm_tables.items()
+            for table, fields in tables.items()
+        }
+        for system, table, fields in unassigned:
+            key = (system, table)
+            if key in assigned or key in used:
+                continue
+            norm_set = all_norm_sets[key]
+            best_group, best_score = None, 0.0
+            for group in groups:
+                if group.method != "field_overlap":
                     continue
-                best_group, best_score = None, 0.0
-                for group in groups:
-                    if group.method != "field_overlap":
-                        continue
-                    if system in group.tables:
-                        continue
-                    member_scores = [
-                        self.table_pair_score(fields, norm_tables[ms][mt])
-                        for ms, mt in group.tables.items()
-                    ]
-                    score = max(member_scores) if member_scores else 0.0
-                    if score > best_score:
-                        best_group, best_score = group, score
-                if best_group is not None and best_score >= self.pair_field_threshold:
-                    best_group.tables[system] = table
-                    best_group._score_sum += best_score
-                    best_group._score_count += 1
-                    best_group.confidence = (
-                        best_group._score_sum / best_group._score_count
-                    )
-                    used.add(key)
+                if system in group.tables:
+                    continue
+                member_scores = [
+                    self.table_pair_score(fields, norm_tables[ms][mt])
+                    for ms, mt in group.tables.items()
+                    if norm_set & all_norm_sets[(ms, mt)]
+                ]
+                score = max(member_scores) if member_scores else 0.0
+                if score > best_score:
+                    best_group, best_score = group, score
+            if best_group is not None and best_score >= self.pair_field_threshold:
+                best_group.tables[system] = table
+                best_group._score_sum += best_score
+                best_group._score_count += 1
+                best_group.confidence = (
+                    best_group._score_sum / best_group._score_count
+                )
+                used.add(key)
 
         groups = [g for g in groups if len(g.tables) >= 2]
         logger.info(

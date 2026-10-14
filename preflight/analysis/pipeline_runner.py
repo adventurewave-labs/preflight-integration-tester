@@ -57,6 +57,57 @@ def resolve_connector_type(connector_type: str) -> Optional[str]:
     return _CONNECTOR_ALIASES.get((connector_type or "").lower().strip())
 
 
+# Config keys that can name a remote host for some connector family.
+_HOST_KEYS = ("host", "account", "instance_url", "login_url", "url", "hostname")
+
+
+def allowed_hosts() -> set:
+    """Hosts permitted when PREFLIGHT_ALLOWED_HOSTS is set (lower-cased).
+
+    Empty set = unrestricted (the intended single-tenant pre-purchase
+    usage). When the list IS set, enforcement is fail-closed: a config
+    that names no host at all is refused, not waved through.
+    """
+    import os
+
+    return {
+        h.strip().lower()
+        for h in os.environ.get("PREFLIGHT_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    }
+
+
+def check_host_allowed(config: Dict[str, Any]) -> Optional[str]:
+    """Return an error string when the host allowlist blocks this config.
+
+    Checked on BOTH the connection-test path and every diagnostic run —
+    the run is the path that opens connections, introspects schemas and
+    generates load, so testing-only enforcement would guard the wrong door.
+    """
+    allowed = allowed_hosts()
+    if not allowed:
+        return None
+    raw = None
+    for key in _HOST_KEYS:
+        val = (config or {}).get(key)
+        if isinstance(val, str) and val.strip():
+            raw = val.strip()
+            break
+    if raw is None:
+        return (
+            "connection config declares no host while PREFLIGHT_ALLOWED_HOSTS "
+            "is set; refusing (fail closed)"
+        )
+    candidate = raw.lower()
+    if "://" in candidate:
+        from urllib.parse import urlparse
+
+        candidate = (urlparse(candidate).hostname or "").lower()
+    if candidate not in allowed:
+        return f"host '{candidate}' is not in the allowed hosts list"
+    return None
+
+
 @dataclass
 class ConnectedSystem:
     name: str
@@ -159,6 +210,10 @@ async def collect_real_inputs(
                     f"{name}: no connector implemented for type "
                     f"'{conn.get('connector_type')}' yet — skipped"
                 )
+                continue
+            allow_error = check_host_allowed(conn.get('config') or {})
+            if allow_error is not None:
+                inputs.warnings.append(f"{name}: skipped — {allow_error}")
                 continue
             try:
                 connector = create_connector(
@@ -291,6 +346,15 @@ async def run_pipeline_tests(
 
         stress_scenario = dict(scenario)
         stress_scenario['duration_seconds'] = duration
+        if system.connector_type == 'salesforce':
+            # Every SOQL probe counts against the org's daily API quota:
+            # cap the worst case at ~100 calls per run (10 s * 10 QPS)
+            # regardless of the scenario's QPM/peak settings.
+            stress_scenario['queries_per_minute'] = min(
+                stress_scenario.get('queries_per_minute', 60), 600
+            )
+            stress_scenario['peak_multiplier'] = 1.0
+            stress_scenario['duration_seconds'] = min(duration, 10)
         try:
             result = await tester.simulate_ai_agent_workload(
                 system.name, query_fn, stress_scenario
@@ -386,7 +450,9 @@ async def run_diagnostic(
             progress('pipeline', 'Pipeline test complete')
         else:
             matcher = EntityMatcher(
-                field_similarity_threshold=schema_cfg.get('field_similarity_threshold', 0.7),
+                # Same default as EntityMatcher itself (0.8) so tested
+                # behavior == shipped behavior unless config overrides it.
+                field_similarity_threshold=schema_cfg.get('field_similarity_threshold', 0.8),
             )
             # Matching is CPU-bound and quadratic-ish on large estates; keep
             # it off the event loop so API health checks stay responsive.
@@ -452,6 +518,13 @@ async def run_diagnostic(
             'entity_matches': entity_matches,
             'warnings': warnings,
             'mock': mock,
+            # Which systems contributed real vs synthetic (mock-fallback)
+            # data, so reports can say when a 'real' score mixes synthetic
+            # schemas.
+            'data_sources': (
+                {s.name: ('mock' if s.is_mock_fallback else 'real') for s in inputs.systems}
+                if inputs else {}
+            ),
         }
 
     finally:

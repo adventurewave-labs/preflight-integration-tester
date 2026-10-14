@@ -733,3 +733,122 @@ class TestRound6Fixes:
             "declared pass re-claimed tables already grouped by exact pass: "
             + str([g.tables for g in declared_groups])
         )
+
+
+class TestRound7Fixes:
+    async def test_allowlist_enforced_on_diagnostic_path(self, monkeypatch):
+        """The run — not just the probe — must honor PREFLIGHT_ALLOWED_HOSTS:
+        a stored disallowed connection is skipped at collect time."""
+        from preflight.analysis import pipeline_runner as pr
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
+        connections = [
+            {"name": "evil", "connector_type": "mock",
+             "config": {"host": "evil.example.com"}},
+        ]
+        with pytest.raises(pr.PipelineError):
+            inputs = None
+            try:
+                inputs = await pr.collect_real_inputs(connections, {})
+            finally:
+                assert inputs is None or not inputs.systems
+        # And the warning says why
+        # (collect_real_inputs raises before returning warnings, so drive
+        # it with one allowed mock system to observe the skip warning)
+        connections.append(
+            {"name": "ok", "connector_type": "mock", "config": {"host": "db.internal"}}
+        )
+        inputs = await pr.collect_real_inputs(connections, {})
+        assert [s.name for s in inputs.systems] == ["ok"]
+        assert any("not in the allowed hosts list" in w for w in inputs.warnings)
+
+    async def test_allowlist_fail_closed_without_host(self, monkeypatch):
+        from preflight.analysis import pipeline_runner as pr
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal")
+        assert pr.check_host_allowed({}) is not None
+        assert "fail closed" in pr.check_host_allowed({})
+
+    async def test_allowlist_case_insensitive_and_url_aware(self, monkeypatch):
+        from preflight.analysis import pipeline_runner as pr
+
+        monkeypatch.setenv("PREFLIGHT_ALLOWED_HOSTS", "db.internal,crm.internal")
+        assert pr.check_host_allowed({"host": "DB.INTERNAL"}) is None
+        assert pr.check_host_allowed({"host": "db.internal:5432"}) is not None
+        assert (
+            pr.check_host_allowed({"instance_url": "https://CRM.internal/api"}) is None
+        )
+        assert (
+            pr.check_host_allowed({"instance_url": "https://other.example.com"})
+            is not None
+        )
+
+    def test_perf_guard_exercises_quadratic_pass(self):
+        """Unique table names per system + SHARED field names: the exact
+        pass groups nothing, so step 4 (prefilter -> cached fuzzy scoring)
+        does the real 250x250 work."""
+        import time as _time
+
+        # 150 tables/system = 300 candidates (under the 400 default cap)
+        # and a 150x150 pair space that only the caches keep fast.
+        schemas = {
+            sys_name: {f"{sys_name}_t{i}": _f(*(f"col_{j}" for j in range(20)))
+                       for i in range(150)}
+            for sys_name in ("a", "b")
+        }
+        start = _time.monotonic()
+        groups = EntityMatcher().build_entity_groups(schemas)
+        elapsed = _time.monotonic() - start
+        overlap = [g for g in groups if g.method == "field_overlap"]
+        assert overlap, "prefilter/caches broke grouping"
+        assert elapsed < 30, f"matcher too slow: {elapsed:.1f}s"
+
+    def test_cap_actually_prevents_grouping(self):
+        """Shared exact fields + unique names: with a low cap the quadratic
+        pass is skipped (no groups); with a high cap the same schemas group.
+        Removing the cap check fails this test."""
+        schemas = {
+            sys_name: {f"{sys_name}_t{i}": _f("id", "name", "amount")
+                       for i in range(50)}
+            for sys_name in ("a", "b")
+        }
+        capped = EntityMatcher(max_field_overlap_candidates=10)
+        assert capped.build_entity_groups(schemas) == []
+        uncapped = EntityMatcher(max_field_overlap_candidates=10_000)
+        assert [g for g in uncapped.build_entity_groups(schemas)
+                if g.method == "field_overlap"]
+
+    async def test_legacy_string_entities_accepted_by_api(self):
+        """Pre-change clients sent ["customer"]; they must not 422."""
+        from fastapi.testclient import TestClient
+        from preflight.api.dependencies import (
+            _connections_store, _runs_store, _reports_store,
+        )
+        from preflight.api.app import create_app
+        from preflight.api.routes.diagnostics import _entities_as_dicts
+        from preflight.api.schemas import CreateScenarioRequest
+
+        req = CreateScenarioRequest(
+            name="t", target_systems=["db"],
+            business_entities=["customer", {"name": "order", "fields": ["id"]}],
+        )
+        shapes = _entities_as_dicts(req.business_entities)
+        assert shapes == [
+            {"name": "customer", "fields": []},
+            {"name": "order", "fields": ["id"], "primary_system": None},
+        ]
+        _connections_store.clear(); _runs_store.clear(); _reports_store.clear()
+        app = create_app()
+        with TestClient(app) as client:
+            conn = client.post("/connections", json={
+                "name": "db", "connector_type": "mock",
+                "system_type": "DATABASE", "config": {},
+            })
+            assert conn.status_code in (200, 201)
+            resp = client.post("/diagnostics", json={
+                "name": "legacy",
+                "scenario": {"name": "t", "target_systems": ["db"],
+                             "business_entities": ["customer"]},
+                "connection_ids": [conn.json()["id"]],
+            })
+            assert resp.status_code in (200, 201, 202), resp.text

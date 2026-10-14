@@ -78,8 +78,8 @@ async def _run_diagnostic(
             "queries_per_minute": request.scenario.queries_per_minute,
             "peak_multiplier": request.scenario.peak_multiplier,
             "response_time_target_ms": request.scenario.response_time_target_ms,
-            "business_entities": [be.model_dump() for be in request.scenario.business_entities],
-            "entities": [be.model_dump() for be in request.scenario.business_entities],
+            "business_entities": _entities_as_dicts(request.scenario.business_entities),
+            "entities": _entities_as_dicts(request.scenario.business_entities),
         }
 
         # ── The real pipeline (shared with the CLI) ─────────────────────────
@@ -213,6 +213,17 @@ async def _run_diagnostic(
         run["status"] = "failed"
         run["error_message"] = str(exc)
         run["completed_at"] = datetime.now(timezone.utc)
+
+
+def _entities_as_dicts(business_entities) -> List[Dict]:
+    """BusinessEntity models -> dicts; plain strings (legacy clients) ->
+    fieldless dicts, which the matcher accepts and skips."""
+    from preflight.api.schemas import BusinessEntity
+
+    return [
+        be.model_dump() if isinstance(be, BusinessEntity) else {"name": str(be), "fields": []}
+        for be in (business_entities or [])
+    ]
 
 
 def _build_remediation(inconsistencies: List[Dict], gaps: List[Dict]) -> List[Dict]:

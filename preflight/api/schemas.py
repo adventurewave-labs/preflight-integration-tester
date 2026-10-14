@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Any
+from pydantic import model_validator, BaseModel, Field, validator
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
 
@@ -38,7 +38,7 @@ class CreateScenarioRequest(BaseModel):
     queries_per_minute: int = Field(60, ge=1, le=10000)
     peak_multiplier: float = Field(2.0, ge=1.0, le=10.0)
     response_time_target_ms: int = Field(500, ge=50, le=30000)
-    business_entities: List["BusinessEntity"] = Field(default_factory=list)
+    business_entities: List[Union[str, "BusinessEntity"]] = Field(default_factory=list)
     use_case: str = ""
 
 
@@ -49,6 +49,15 @@ class BusinessEntity(BaseModel):
     name: str
     fields: List[str] = Field(default_factory=list)
     primary_system: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_plain_string(cls, data):
+        """Backwards compatibility: pre-change clients sent plain entity
+        names (["customer"]). Coerce to a fieldless entity instead of 422."""
+        if isinstance(data, str):
+            return {"name": data}
+        return data
 
 class CreateDiagnosticRunRequest(BaseModel):
     name: str

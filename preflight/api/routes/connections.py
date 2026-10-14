@@ -32,23 +32,19 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
     counts come from synthetic data.  Credentials ARE validated: a failed
     handshake returns ``status="failed"`` with the error message.
     """
-    from preflight.analysis.pipeline_runner import resolve_connector_type
+    from preflight.analysis.pipeline_runner import (
+    check_host_allowed,
+    resolve_connector_type,
+)
 
-    # Optional host allowlist (comma-separated) for multi-tenant deployments:
-    # PREFLIGHT_ALLOWED_HOSTS=db.internal,crm.internal — empty/unset means
-    # unrestricted, which is the intended single-tenant pre-purchase usage.
-    import os
-
-    allowed = {
-        h.strip()
-        for h in os.environ.get("PREFLIGHT_ALLOWED_HOSTS", "").split(",")
-        if h.strip()
-    }
-    target_host = (config or {}).get("host") or (config or {}).get("account") or ""
-    if allowed and target_host and target_host not in allowed:
+    # Shared, fail-closed allowlist (see pipeline_runner.check_host_allowed):
+    # enforced here AND on every diagnostic run, since the run is what opens
+    # connections and generates load.
+    allow_error = check_host_allowed(config or {})
+    if allow_error is not None:
         return {
             "status": "failed",
-            "error_message": f"host '{target_host}' is not in the allowed hosts list",
+            "error_message": allow_error,
             "entity_count": 0,
             "connection_latency_ms": None,
         }
