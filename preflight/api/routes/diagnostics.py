@@ -117,7 +117,6 @@ async def _run_diagnostic(
         pipeline_results = payload["pipeline_bottlenecks"]
         executive_summary = payload["executive_summary"]
 
-        run["progress_pct"] = 80.0
         await asyncio.sleep(0)
 
         # ── Build report payload ──────────────────────────────────────────────

@@ -283,6 +283,34 @@ class EntityMatcher:
                     )
                 )
 
+        # 4b. Second sweep: the greedy anchor pass can strand a table that
+        # matches a *member* of an existing group but not that group's anchor
+        # (the anchor may already have been consumed as a member elsewhere).
+        # Try to attach every remaining table to its best-scoring existing
+        # group; one table per system per group, as everywhere else.
+        for system, tables in norm_tables.items():
+            for table, fields in tables.items():
+                key = (system, normalize_table_name(table))
+                if key in assigned or key in used:
+                    continue
+                best_group, best_score = None, 0.0
+                for group in groups:
+                    if group.method not in ("field_overlap", "vocabulary"):
+                        continue
+                    if system in group.tables:
+                        continue
+                    member_scores = [
+                        self.table_pair_score(fields, norm_tables[ms][mt])
+                        for ms, mt in group.tables.items()
+                    ]
+                    score = max(member_scores) if member_scores else 0.0
+                    if score > best_score:
+                        best_group, best_score = group, score
+                if best_group is not None and best_score >= self.pair_field_threshold:
+                    best_group.tables[system] = table
+                    used.add(key)
+
+        groups = [g for g in groups if len(g.tables) >= 2]
         logger.info(
             "Entity matching: %d group(s) across %d system(s)",
             len(groups),

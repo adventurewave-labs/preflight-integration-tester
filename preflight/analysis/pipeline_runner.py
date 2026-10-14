@@ -52,6 +52,11 @@ class PipelineError(RuntimeError):
     """Raised when the pipeline cannot run at all (e.g. nothing connectable)."""
 
 
+def resolve_connector_type(connector_type: str) -> Optional[str]:
+    """Map a user-supplied connector type to its registry name, or None."""
+    return _CONNECTOR_ALIASES.get((connector_type or "").lower().strip())
+
+
 @dataclass
 class ConnectedSystem:
     name: str
@@ -147,14 +152,13 @@ async def collect_real_inputs(
 
     for conn in connections:
         name = conn.get('name') or conn.get('connector_type', 'system')
-        ctype = (conn.get('connector_type') or '').lower().strip()
-        if ctype not in _CONNECTOR_ALIASES or _CONNECTOR_ALIASES[ctype] not in supported:
+        registry_type = resolve_connector_type(conn.get('connector_type') or '')
+        if registry_type is None or registry_type not in supported:
             inputs.warnings.append(
                 f"{name}: no connector implemented for type "
                 f"'{conn.get('connector_type')}' yet — skipped"
             )
             continue
-        registry_type = _CONNECTOR_ALIASES[ctype]
         try:
             connector = create_connector(
                 registry_type, conn.get('config') or {}, timeout_seconds=connect_timeout
@@ -311,108 +315,110 @@ async def run_diagnostic(
     warnings: List[str] = []
     inputs: Optional[RealInputs] = None
 
-    # 1. Collect inputs -------------------------------------------------------
-    if mock:
-        schemas = demo_schemas()
-        pipeline_results = demo_pipeline_results()
-        connections_list = [
-            {'name': s, 'type': SYSTEM_TYPE_MAP.get(s, 'ERP' if 'sap' in s else 'CRM')}
-            for s in scenario.get('systems', [])
-        ]
-        progress('connect', 'Systems connected')
-    else:
-        conn_defs = connections if connections is not None else _connections_from_config(config)
-        inputs = await collect_real_inputs(
-            conn_defs,
-            scenario,
-            connect_timeout=(config.get('performance', {}) or {}).get('connection_timeout', 30),
-        )
-        warnings.extend(inputs.warnings)
-        schemas = inputs.schemas
-        connections_list = inputs.connection_summaries()
-        fallbacks = sum(1 for s in inputs.systems if s.is_mock_fallback)
-        suffix = f" ({fallbacks} on mock data)" if fallbacks else ""
-        progress('connect', f'Systems connected: {len(inputs.systems)}{suffix}')
-
-    # 2. Schema analysis ------------------------------------------------------
-    analyzer = SchemaAnalyzer(
-        similarity_threshold=schema_cfg.get('entity_matching_threshold', 0.8)
-    )
-    if mock:
-        # Frozen demo semantics: same-name entities only (reproduces 97.0/GO).
-        schema_results = analyzer.analyze_all(schemas)
-        inconsistencies = analyzer.generate_inconsistency_report(schema_results)
-        progress('schema', f'Schema analysis: {len(inconsistencies)} issues found')
-        progress('pipeline', 'Pipeline test complete')
-    else:
-        matcher = EntityMatcher(
-            field_similarity_threshold=schema_cfg.get('field_similarity_threshold', 0.7),
-        )
-        groups = matcher.build_entity_groups(schemas, scenario.get('entities') or [])
-        entity_matches = [g.as_match_info() for g in groups]
-        schema_results = analyzer.analyze_entity_groups(schemas, groups)
-        inconsistencies = analyzer.generate_inconsistency_report(schema_results)
-        progress('schema', f'Schema analysis: {len(inconsistencies)} issues found')
-
-        stress_cfg = analysis_cfg.get('pipeline_stress_test', {}) or {}
-        if stress_cfg.get('enabled', True):
-            pipeline_results = await run_pipeline_tests(
-                inputs, scenario, duration_seconds=stress_cfg.get('duration_seconds')
-            )
+    try:
+        # 1. Collect inputs -------------------------------------------------------
+        if mock:
+            schemas = demo_schemas()
+            pipeline_results = demo_pipeline_results()
+            connections_list = [
+                {'name': s, 'type': SYSTEM_TYPE_MAP.get(s, 'ERP' if 'sap' in s else 'CRM')}
+                for s in scenario.get('systems', [])
+            ]
+            progress('connect', 'Systems connected')
         else:
-            pipeline_results = []
-        progress('pipeline', 'Pipeline test complete')
+            conn_defs = connections if connections is not None else _connections_from_config(config)
+            inputs = await collect_real_inputs(
+                conn_defs,
+                scenario,
+                connect_timeout=(config.get('performance', {}) or {}).get('connection_timeout', 30),
+            )
+            warnings.extend(inputs.warnings)
+            schemas = inputs.schemas
+            connections_list = inputs.connection_summaries()
+            fallbacks = sum(1 for s in inputs.systems if s.is_mock_fallback)
+            suffix = f" ({fallbacks} on mock data)" if fallbacks else ""
+            progress('connect', f'Systems connected: {len(inputs.systems)}{suffix}')
 
-    # 3. Middleware analysis --------------------------------------------------
-    mw_analyzer = MiddlewareAnalyzer()
-    gaps = mw_analyzer.analyze(
-        connections_list or [{'name': s, 'type': 'ERP'} for s in scenario.get('systems', [])],
-        scenario,
-        {'inconsistencies': inconsistencies},
-    )
-    progress('middleware', f'Middleware: {len(gaps)} gaps found')
+        # 2. Schema analysis ------------------------------------------------------
+        analyzer = SchemaAnalyzer(
+            similarity_threshold=schema_cfg.get('entity_matching_threshold', 0.8)
+        )
+        if mock:
+            # Frozen demo semantics: same-name entities only (reproduces 97.0/GO).
+            schema_results = analyzer.analyze_all(schemas)
+            inconsistencies = analyzer.generate_inconsistency_report(schema_results)
+            progress('schema', f'Schema analysis: {len(inconsistencies)} issues found')
+            progress('pipeline', 'Pipeline test complete')
+        else:
+            matcher = EntityMatcher(
+                field_similarity_threshold=schema_cfg.get('field_similarity_threshold', 0.7),
+            )
+            groups = matcher.build_entity_groups(schemas, scenario.get('entities') or [])
+            entity_matches = [g.as_match_info() for g in groups]
+            schema_results = analyzer.analyze_entity_groups(schemas, groups)
+            inconsistencies = analyzer.generate_inconsistency_report(schema_results)
+            progress('schema', f'Schema analysis: {len(inconsistencies)} issues found')
 
-    # 4. Score ----------------------------------------------------------------
-    calc = ReadinessCalculator(weights=(config.get('reporting', {}) or {}).get('risk_weights'))
-    breakdown = calc.calculate(inconsistencies, pipeline_results, gaps, [])
-    progress('score', f'Score calculated: {breakdown.overall_score:.1f}%')
+            stress_cfg = analysis_cfg.get('pipeline_stress_test', {}) or {}
+            if stress_cfg.get('enabled', True):
+                pipeline_results = await run_pipeline_tests(
+                    inputs, scenario, duration_seconds=stress_cfg.get('duration_seconds')
+                )
+            else:
+                pipeline_results = []
+            progress('pipeline', 'Pipeline test complete')
 
-    # 5. Executive summary + report payload ------------------------------------
-    executive_summary = ExecutiveSummaryGenerator().generate(
-        verdict=breakdown.verdict,
-        score=breakdown.overall_score,
-        schema_issues=inconsistencies,
-        pipeline_issues=pipeline_results,
-        middleware_gaps=gaps,
-        scenario=scenario,
-        remediation_weeks=breakdown.estimated_remediation_weeks,
-    )
-    progress('report', 'Report generated')
+        # 3. Middleware analysis --------------------------------------------------
+        mw_analyzer = MiddlewareAnalyzer()
+        gaps = mw_analyzer.analyze(
+            connections_list or [{'name': s, 'type': 'ERP'} for s in scenario.get('systems', [])],
+            scenario,
+            {'inconsistencies': inconsistencies},
+        )
+        progress('middleware', f'Middleware: {len(gaps)} gaps found')
 
-    if inputs is not None:
-        for system in inputs.systems:
-            await _safe_disconnect(system.connector)
+        # 4. Score ----------------------------------------------------------------
+        calc = ReadinessCalculator(weights=(config.get('reporting', {}) or {}).get('risk_weights'))
+        breakdown = calc.calculate(inconsistencies, pipeline_results, gaps, [])
+        progress('score', f'Score calculated: {breakdown.overall_score:.1f}%')
 
-    return {
-        'readiness_score': breakdown.overall_score,
-        'verdict': breakdown.verdict,
-        'scenario_name': scenario.get('name', 'AI Deployment'),
-        'executive_summary': executive_summary,
-        'schema_inconsistencies': inconsistencies,
-        'middleware_gaps': gaps,
-        'pipeline_bottlenecks': pipeline_results,
-        'remediation_plan': build_remediation_plan(inconsistencies, gaps),
-        'critical_count': breakdown.critical_issues,
-        'total_issues': breakdown.total_issues,
-        'remediation_weeks': (
-            f"{breakdown.estimated_remediation_weeks:.0f}"
-            if breakdown.estimated_remediation_weeks
-            else "TBD"
-        ),
-        'entity_matches': entity_matches,
-        'warnings': warnings,
-        'mock': mock,
-    }
+        # 5. Executive summary + report payload ------------------------------------
+        executive_summary = ExecutiveSummaryGenerator().generate(
+            verdict=breakdown.verdict,
+            score=breakdown.overall_score,
+            schema_issues=inconsistencies,
+            pipeline_issues=pipeline_results,
+            middleware_gaps=gaps,
+            scenario=scenario,
+            remediation_weeks=breakdown.estimated_remediation_weeks,
+        )
+        progress('report', 'Report generated')
+
+        return {
+            'readiness_score': breakdown.overall_score,
+            'verdict': breakdown.verdict,
+            'scenario_name': scenario.get('name', 'AI Deployment'),
+            'executive_summary': executive_summary,
+            'schema_inconsistencies': inconsistencies,
+            'middleware_gaps': gaps,
+            'pipeline_bottlenecks': pipeline_results,
+            'remediation_plan': build_remediation_plan(inconsistencies, gaps),
+            'critical_count': breakdown.critical_issues,
+            'total_issues': breakdown.total_issues,
+            'remediation_weeks': (
+                f"{breakdown.estimated_remediation_weeks:.0f}"
+                if breakdown.estimated_remediation_weeks
+                else "TBD"
+            ),
+            'entity_matches': entity_matches,
+            'warnings': warnings,
+            'mock': mock,
+        }
+
+    finally:
+        if inputs is not None:
+            for system in inputs.systems:
+                await _safe_disconnect(system.connector)
 
 
 def _connections_from_config(config: Dict[str, Any]) -> List[Dict]:

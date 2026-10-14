@@ -29,8 +29,13 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
     counts come from synthetic data.  Credentials ARE validated: a failed
     handshake returns ``status="failed"`` with the error message.
     """
+    from preflight.analysis.pipeline_runner import resolve_connector_type
+
     start = time.monotonic()
-    key = (connector_type or "").lower().strip()
+    requested = connector_type or ""
+    # Resolve aliases the same way the pipeline runner does, so a connection
+    # that passes the API test is also accepted by a diagnostic run.
+    key = resolve_connector_type(requested) or requested.lower().strip()
     try:
         connector = create_connector(key, config or {}, timeout_seconds=10)
     except ValueError as exc:
