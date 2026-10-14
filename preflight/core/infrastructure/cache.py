@@ -126,14 +126,16 @@ class DiagnosticCache:
         redis_url: Optional Redis connection URL, e.g.
             ``"redis://localhost:6379/0"``.  If not provided or unavailable,
             falls back to diskcache or in-memory.
-        diskcache_dir: Directory for diskcache storage.  Defaults to
-            ``/tmp/preflight_cache``.
+        diskcache_dir: Directory for diskcache storage.  ``None`` (the
+            default) gives each instance a private temp directory; pass an
+            explicit path only when you deliberately want a shared,
+            persistent cache.
     """
 
     def __init__(
         self,
         redis_url: Optional[str] = None,
-        diskcache_dir: str = "/tmp/preflight_cache",
+        diskcache_dir: Optional[str] = None,
     ):
         self._redis_client: Optional[Any] = None
         self._sync_backend: Optional[Any] = None
@@ -156,7 +158,7 @@ class DiagnosticCache:
                 self._sync_backend = _DiskCacheBackend(diskcache_dir)
                 self._backend_name = "diskcache"
                 logger.info(
-                    "DiagnosticCache: using diskcache backend at %s", diskcache_dir
+                    "DiagnosticCache: using diskcache backend at %s", diskcache_dir or "<private tempdir>"
                 )
             else:
                 self._sync_backend = _InMemoryBackend()
