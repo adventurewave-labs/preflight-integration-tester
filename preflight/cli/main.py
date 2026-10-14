@@ -131,12 +131,14 @@ async def _run_diagnostic(config_path: str, output_dir: str, format: str, mock: 
 
 def _display_results(report_data, inconsistencies, gaps, output_dir):
     """Display results in a rich terminal output."""
-    # Score panel
+    # Score panel — color and icon follow the VERDICT (a NOT_YET verdict must
+    # never show a green OK icon just because the score crossed 80).
     score = report_data['readiness_score']
-    if score >= 80:
+    verdict = report_data['verdict']
+    if verdict == 'GO':
         color = "green"
         emoji = "OK"
-    elif score >= 50:
+    elif verdict == 'NOT_YET':
         color = "yellow"
         emoji = "WARN"
     else:
@@ -205,6 +207,7 @@ def _map_inconsistency(i: dict) -> dict:
         'severity': i.get('severity', 'MEDIUM'),
         'impact_description': i.get('detail', ''),
         'remediation_hint': 'Review field definitions and align schemas',
+        'entity_match': i.get('entity_match'),
     }
 
 def _map_gap(g: dict) -> dict:
