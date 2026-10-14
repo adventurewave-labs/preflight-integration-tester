@@ -160,13 +160,30 @@ async def _run_diagnostic(
 
         remediation = _build_remediation(inconsistencies, gaps)
 
+        # Map measured bottleneck rows (CLI shape) onto the API response model.
+        pipeline_resp = [
+            PipelineBottleneckResponse(
+                id=str(uuid.uuid4()),
+                system=row.get("system", ""),
+                bottleneck_type="stress_test",
+                severity=row.get("severity", "INFO"),
+                description=(
+                    f"{row.get('system', 'system')}: p95 {row.get('p95_ms', 0)} ms, "
+                    f"{row.get('error_rate_pct', 0)}% errors at {row.get('actual_qps', 0)} QPS"
+                ),
+                p95_latency_ms=row.get("p95_ms"),
+                error_rate_pct=row.get("error_rate_pct"),
+            ).model_dump()
+            for row in pipeline_results
+        ]
+
         report_payload = {
             "run_id": run_id,
             "readiness_score": payload["readiness_score"],
             "verdict": payload["verdict"],
             "executive_summary": executive_summary,
             "schema_inconsistencies": schema_resp,
-            "pipeline_bottlenecks": pipeline_results,
+            "pipeline_bottlenecks": pipeline_resp,
             "middleware_gaps": middleware_resp,
             "remediation_plan": remediation,
             "total_effort_min_days": None,
