@@ -13,9 +13,11 @@ backend is in use.
 """
 
 import asyncio
+import atexit
 import fnmatch
 import json
 import logging
+import shutil
 import time
 from typing import Any, Dict, Optional
 
@@ -88,8 +90,21 @@ class _DiskCacheBackend:
         # directory.  The previous hardcoded "/tmp/preflight_cache" shared
         # one world-readable directory across ALL instances (and processes),
         # which broke instance isolation and leaked cached data between
-        # unrelated runs and local users.
+        # unrelated runs and local users.  Temp directories we create are
+        # removed again at interpreter exit.
+        self._owns_directory = directory is None
         self._cache = diskcache.Cache(directory)
+        if self._owns_directory:
+            atexit.register(self._cleanup_tempdir)
+
+    def _cleanup_tempdir(self) -> None:
+        """Close the cache and remove the temp directory we created."""
+        try:
+            directory = self._cache.directory
+            self._cache.close()
+            shutil.rmtree(directory, ignore_errors=True)
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
 
     def get(self, key: str) -> Optional[str]:
         return self._cache.get(key)

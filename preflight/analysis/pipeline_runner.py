@@ -150,62 +150,72 @@ async def collect_real_inputs(
     inputs = RealInputs(declared_entities=scenario.get('entities') or [])
     supported = set(list_connector_types())
 
-    for conn in connections:
-        name = conn.get('name') or conn.get('connector_type', 'system')
-        registry_type = resolve_connector_type(conn.get('connector_type') or '')
-        if registry_type is None or registry_type not in supported:
-            inputs.warnings.append(
-                f"{name}: no connector implemented for type "
-                f"'{conn.get('connector_type')}' yet — skipped"
-            )
-            continue
-        try:
-            connector = create_connector(
-                registry_type, conn.get('config') or {}, timeout_seconds=connect_timeout
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            inputs.warnings.append(f"{name}: connector creation failed: {exc}")
-            continue
+    try:
+        for conn in connections:
+            name = conn.get('name') or conn.get('connector_type', 'system')
+            registry_type = resolve_connector_type(conn.get('connector_type') or '')
+            if registry_type is None or registry_type not in supported:
+                inputs.warnings.append(
+                    f"{name}: no connector implemented for type "
+                    f"'{conn.get('connector_type')}' yet — skipped"
+                )
+                continue
+            try:
+                connector = create_connector(
+                    registry_type, conn.get('config') or {}, timeout_seconds=connect_timeout
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                inputs.warnings.append(f"{name}: connector creation failed: {exc}")
+                continue
 
-        is_fallback = registry_type != 'mock' and type(connector).__name__.startswith('Mock')
-        if is_fallback:
-            inputs.warnings.append(
-                f"{name}: client library for '{registry_type}' not installed — "
-                f"using MOCK data for this system"
+            is_fallback = registry_type != 'mock' and type(connector).__name__.startswith('Mock')
+            if is_fallback:
+                inputs.warnings.append(
+                    f"{name}: client library for '{registry_type}' not installed — "
+                    f"using MOCK data for this system"
+                )
+            try:
+                connected = await asyncio.wait_for(connector.connect(), timeout=connect_timeout)
+            except Exception as exc:
+                logger.warning("%s: connection failed: %s", name, exc)
+                inputs.warnings.append(
+                    f"{name}: connection failed (check host/credentials)"
+                )
+                await _safe_disconnect(connector)
+                continue
+            if not connected:
+                inputs.warnings.append(f"{name}: connection failed")
+                await _safe_disconnect(connector)
+                continue
+
+            try:
+                meta = await asyncio.wait_for(connector.get_metadata(), timeout=connect_timeout * 2)
+            except Exception as exc:
+                inputs.warnings.append(f"{name}: schema introspection failed: {exc}")
+                await _safe_disconnect(connector)
+                continue
+
+            system = ConnectedSystem(
+                name=name, connector_type=registry_type, connector=connector,
+                is_mock_fallback=is_fallback,
             )
-        try:
-            connected = await asyncio.wait_for(connector.connect(), timeout=connect_timeout)
-        except Exception as exc:
-            inputs.warnings.append(f"{name}: connection failed: {exc}")
-            continue
-        if not connected:
-            inputs.warnings.append(f"{name}: connection failed")
-            continue
-
-        try:
-            meta = await asyncio.wait_for(connector.get_metadata(), timeout=connect_timeout * 2)
-        except Exception as exc:
-            inputs.warnings.append(f"{name}: schema introspection failed: {exc}")
-            await _safe_disconnect(connector)
-            continue
-
-        system = ConnectedSystem(
-            name=name, connector_type=registry_type, connector=connector,
-            is_mock_fallback=is_fallback,
-        )
-        inputs.systems.append(system)
-        inputs.schemas[name] = {
-            table.name: [
-                {
-                    'name': col.get('name', ''),
-                    'type': col.get('type', 'unknown'),
-                    'nullable': bool(col.get('nullable', True)),
-                }
-                for col in table.columns
-            ]
-            for table in meta.tables
-        }
-        logger.info("Collected %d tables from %s", len(meta.tables), name)
+            inputs.systems.append(system)
+            inputs.schemas[name] = {
+                table.name: [
+                    {
+                        'name': col.get('name', ''),
+                        'type': col.get('type', 'unknown'),
+                        'nullable': bool(col.get('nullable', True)),
+                    }
+                    for col in table.columns
+                ]
+                for table in meta.tables
+            }
+            logger.info("Collected %d tables from %s", len(meta.tables), name)
+    except Exception:
+        for system in inputs.systems:
+            await _safe_disconnect(system.connector)
+        raise
 
     if not inputs.systems:
         raise PipelineError(
@@ -233,6 +243,17 @@ def _bottleneck_severity(error_rate_pct: float, p95_ms: float) -> str:
     return 'INFO'
 
 
+# Lightweight liveness probe per connector dialect: the statement must be
+# valid for the target system (SOQL requires FROM/LIMIT; there is no bare
+# "SELECT 1" in Salesforce) and cheap enough to repeat at the scenario's QPS.
+_STRESS_PROBE_SQL = {
+    "salesforce": "SELECT Id FROM Account LIMIT 1",
+    "snowflake": "SELECT 1",
+    "postgresql": "SELECT 1",
+    "mock": "SELECT 1",
+}
+
+
 async def run_pipeline_tests(
     inputs: RealInputs,
     scenario: Dict[str, Any],
@@ -254,9 +275,10 @@ async def run_pipeline_tests(
         if system.is_mock_fallback:
             continue
         connector = system.connector
+        probe_sql = _STRESS_PROBE_SQL.get(system.connector_type, "SELECT 1")
 
         async def query_fn(_req_id: int) -> bool:
-            result = await connector.execute_read_query('SELECT 1')
+            result = await connector.execute_read_query(probe_sql)
             return bool(result is not None and not getattr(result, 'error', None))
 
         stress_scenario = dict(scenario)

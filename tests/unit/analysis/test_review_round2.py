@@ -228,8 +228,81 @@ class TestRunDiagnosticCrossNameWiring:
         groups = matcher.build_entity_groups(schemas, declared)
         assert [g.canonical_name for g in groups] == ["customer"]
 
+    async def test_declared_path_matches_sap_all_caps_fields(self):
+        """Declared matching must link SAP all-caps tables WITHOUT the seed
+        vocabulary filling in — regression for the duplicated normalizer:
+        with the old regex, NAME1 normalizes to n_a_m_e1 and 'name' vs
+        'n_a_m_e1' scores 0.67 < 0.8, so the ERP side never reaches the
+        0.3 group threshold and no declared group forms."""
+        matcher = EntityMatcher()
+        # Neither table name is in the seed vocabulary.
+        schemas = {
+            "crm": {"Kundenstamm": _f("Name", "Phone")},
+            "erp": {"DEBI_MST": _f("NAME1", "TELF1")},
+        }
+        declared = [{"name": "customer", "fields": ["name", "phone"]}]
+        groups = matcher.build_entity_groups(schemas, declared)
+        declared_groups = [g for g in groups if g.method == "declared"]
+        assert len(declared_groups) == 1, (
+            "declared pass must match SAP all-caps fields via shared "
+            "normalization; got methods="
+            + str([g.method for g in groups])
+        )
+        assert declared_groups[0].canonical_name == "customer"
+        assert set(declared_groups[0].tables) == {"crm", "erp"}
+        # NAME1<->name must have paired (0.889 with the shared normalizer),
+        # so the ERP side matched 1 of 2 declared fields.
+        assert declared_groups[0].confidence >= 0.5
+
+    async def test_string_entries_in_declared_entities_ignored(self):
+        schemas = {
+            "crm": {"Account": _f("Id", "Name")},
+            "erp": {"KUNNR": _f("KUNNR", "NAME1")},
+        }
+        groups = EntityMatcher().build_entity_groups(
+            schemas, ["customer", {"name": "order", "fields": "not-a-list"}]
+        )
+        # vocabulary still links Account/KUNNR; nothing crashed on the strings
+        assert any(g.canonical_name == "customer" for g in groups)
+
     async def test_bottleneck_severity_boundaries(self):
         assert _bottleneck_severity(5.1, 100) == "HIGH"
-        assert _bottleneck_severity(5.0, 100) != "HIGH" or True  # boundary is >5
+        assert _bottleneck_severity(5.0, 100) == "LOW"  # boundary is strictly >5
         assert _bottleneck_severity(0, 1000.5) == "HIGH"
         assert _bottleneck_severity(0, 501) == "MEDIUM"
+        assert _bottleneck_severity(2.1, 100) == "LOW"
+        assert _bottleneck_severity(2.0, 100) == "INFO"
+
+
+class TestStressProbeSql:
+    def test_salesforce_gets_valid_soql(self):
+        from preflight.analysis.pipeline_runner import _STRESS_PROBE_SQL
+
+        soql = _STRESS_PROBE_SQL["salesforce"]
+        assert " FROM " in soql and "SELECT" in soql.upper()
+        assert _STRESS_PROBE_SQL["postgresql"] == "SELECT 1"
+
+    def test_probe_present_for_every_registered_real_type(self):
+        from preflight.analysis.pipeline_runner import (
+            _STRESS_PROBE_SQL,
+            resolve_connector_type,
+        )
+        from preflight.core.infrastructure.connectors.connector_factory import (
+            list_connector_types,
+        )
+
+        for registered in list_connector_types():
+            canonical = resolve_connector_type(registered) or registered
+            if canonical == "mock":
+                continue
+            assert canonical in _STRESS_PROBE_SQL, registered
+
+
+class TestNormalizedFieldShared:
+    def test_single_source_of_truth(self):
+        from preflight.analysis.entity_matcher import normalize_field_name
+        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+
+        for name in ("NAME1", "KUNNR", "AnnualRevenue", "AccountId", "TELF1"):
+            assert normalize_field_name(name) == SchemaAnalyzer().normalize_field_name(name)
+        assert normalize_field_name("NAME1") == "name1"

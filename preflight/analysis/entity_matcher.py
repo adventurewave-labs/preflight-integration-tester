@@ -79,6 +79,25 @@ def normalize_table_name(name: str) -> str:
     return n
 
 
+_FIELD_ACRONYM_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_FIELD_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
+
+
+def normalize_field_name(name: str) -> str:
+    """Single source of truth for field-name comparison.
+
+    Handles camelCase (AnnualRevenue → annual_revenue) and ERP all-caps
+    conventions (NAME1 → name1, KUNNR → kunnr). Both EntityMatcher and
+    SchemaAnalyzer normalize through this function — divergent copies have
+    caused exactly the SAP-name mismatches this exists to prevent.
+    """
+    normalized = _FIELD_ACRONYM_RE.sub(r"\1_\2", name)  # XMLHttp → XML_Http
+    normalized = _FIELD_CAMEL_RE.sub(r"\1_\2", normalized)  # camel boundary
+    normalized = normalized.lower()
+    normalized = re.sub(r"[^a-z0-9]", "_", normalized)
+    return re.sub(r"_+", "_", normalized).strip("_")
+
+
 class EntityMatcher:
     """Groups same-entity tables across systems.
 
@@ -107,9 +126,8 @@ class EntityMatcher:
 
     @staticmethod
     def _norm_field(name: str) -> str:
-        n = re.sub(r"([A-Z])", r"_\1", name).lower()
-        n = re.sub(r"[^a-z0-9]", "_", n)
-        return re.sub(r"_+", "_", n).strip("_")
+        # Single source of truth: see normalize_field_name above.
+        return normalize_field_name(name)
 
     def _fields_similar(self, a: str, b: str) -> bool:
         na, nb = self._norm_field(a), self._norm_field(b)
@@ -198,8 +216,12 @@ class EntityMatcher:
 
         # 2. Declared entities from the scenario config.
         for entity in declared_entities or []:
+            if not isinstance(entity, dict):
+                continue  # tolerate string entries; nothing to match on
             name = entity.get("name") or ""
             declared_fields = entity.get("fields") or []
+            if not isinstance(declared_fields, (list, tuple)):
+                continue
             if not name or not declared_fields:
                 continue
             chosen: Dict[str, str] = {}

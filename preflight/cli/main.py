@@ -120,7 +120,7 @@ async def _run_diagnostic(config_path: str, output_dir: str, format: str, mock: 
 
     for warning in warnings:
         console.print(f"[yellow]Warning:[/yellow] {warning}")
-    if warnings:
+    if any('MOCK data' in w for w in warnings):
         console.print(
             "[yellow]Results above include mock data for the flagged systems — "
             "install the missing client libraries and re-run for real data.[/yellow]"

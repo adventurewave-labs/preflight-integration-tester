@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from difflib import SequenceMatcher
 
+from preflight.analysis.entity_matcher import normalize_field_name
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -75,17 +77,13 @@ class SchemaAnalyzer:
     def normalize_field_name(self, name: str) -> str:
         """Normalize field name for comparison (snake_case, lowercase). Cached.
 
-        Handles both camelCase (AnnualRevenue → annual_revenue) and ERP
-        all-caps conventions (NAME1 → name1, KUNNR → kunnr) so that SAP-style
-        field names compare sensibly against CRM field names.
+        Delegates to entity_matcher.normalize_field_name — the single source
+        of truth shared with the EntityMatcher so SAP all-caps names
+        (NAME1 → name1) normalize identically everywhere.
         """
         if name in self._norm_cache:
             return self._norm_cache[name]
-        normalized = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', name)  # XMLHttp → XML_Http
-        normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', normalized)  # camel boundary
-        normalized = normalized.lower()
-        normalized = re.sub(r'[^a-z0-9]', '_', normalized)
-        normalized = re.sub(r'_+', '_', normalized).strip('_')
+        normalized = normalize_field_name(name)
         self._norm_cache[name] = normalized
         return normalized
 

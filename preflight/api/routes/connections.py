@@ -2,6 +2,7 @@
 Connection management endpoints.
 """
 import asyncio
+import logging
 import time
 import uuid
 from typing import Dict, Any, List
@@ -16,6 +17,8 @@ from preflight.api.dependencies import get_connections_store
 from preflight.core.infrastructure.connectors.connector_factory import (
     create_connector,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -45,15 +48,28 @@ async def _test_connection(connector_type: str, config: Dict[str, Any]) -> Dict[
             "entity_count": 0,
             "connection_latency_ms": None,
         }
+    except Exception:
+        # Bad config shapes (wrong types, missing nested keys) must not 500.
+        logger.warning("Connector creation failed for type %r", key, exc_info=True)
+        return {
+            "status": "failed",
+            "error_message": "connector could not be created from the given config",
+            "entity_count": 0,
+            "connection_latency_ms": None,
+        }
 
     is_fallback = key != "mock" and type(connector).__name__.startswith("Mock")
     try:
         connected = await asyncio.wait_for(connector.connect(), timeout=10)
     except Exception as exc:
+        # Deliberately coarse message: raw driver errors can echo host/port
+        # details back to API callers, which turns this endpoint into a
+        # network-probing oracle. Full detail goes to the server log only.
+        logger.warning("Connection test failed for %r: %s", key, exc)
         await _safe_disconnect(connector)
         return {
             "status": "failed",
-            "error_message": f"connection failed: {exc}",
+            "error_message": "connection failed (check host, port and credentials)",
             "entity_count": 0,
             "connection_latency_ms": None,
         }
