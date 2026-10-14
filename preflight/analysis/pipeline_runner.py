@@ -521,8 +521,11 @@ async def run_diagnostic(
             else:
                 pipeline_results = []
             # run_pipeline_tests appends failure warnings to inputs.warnings
-            # AFTER the earlier copy — refresh so they reach the payload.
-            warnings[:] = list(inputs.warnings)
+            # AFTER the earlier copy — merge them in WITHOUT discarding
+            # warnings already collected (e.g. partial-matching notice).
+            for late_warning in inputs.warnings:
+                if late_warning not in warnings:
+                    warnings.append(late_warning)
             progress('pipeline', 'Pipeline test complete')
 
         # 3. Middleware analysis --------------------------------------------------
