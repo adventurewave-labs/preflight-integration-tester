@@ -55,88 +55,70 @@ async def _run_diagnostic(
 
         await asyncio.sleep(0)  # yield control
 
-        # Gather connected systems info
-        systems = []
+        # Gather connection definitions from the store — these drive the real
+        # pipeline (create_connector → connect → introspect → analyze).
+        conn_defs = []
         for conn_id in request.connection_ids:
             conn = connections_store.get(conn_id)
             if conn:
-                systems.append({"name": conn["name"], "type": conn["system_type"]})
-
-        # ── Schema analysis ──────────────────────────────────────────────────
-        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+                conn_defs.append(
+                    {
+                        "name": conn["name"],
+                        "connector_type": conn["connector_type"],
+                        "system_type": conn.get("system_type"),
+                        "config": conn.get("config") or {},
+                    }
+                )
 
         scenario_dict = {
             "name": request.scenario.name,
-            "systems": [s["name"] for s in systems],
+            "description": request.scenario.description,
+            "systems": [c["name"] for c in conn_defs],
+            "target_systems": request.scenario.target_systems,
             "concurrent_users": request.scenario.concurrent_users,
             "queries_per_minute": request.scenario.queries_per_minute,
             "peak_multiplier": request.scenario.peak_multiplier,
+            "response_time_target_ms": request.scenario.response_time_target_ms,
+            "business_entities": _entities_as_dicts(request.scenario.business_entities),
+            "entities": _entities_as_dicts(request.scenario.business_entities),
         }
 
-        mock_schemas = {
-            "salesforce": {
-                "Account": [
-                    {"name": "Id", "type": "varchar(18)", "nullable": False},
-                    {"name": "Name", "type": "varchar(255)", "nullable": False},
-                    {"name": "Phone", "type": "varchar(40)", "nullable": True},
-                    {"name": "AnnualRevenue", "type": "decimal", "nullable": True},
-                ],
-                "Contact": [
-                    {"name": "Id", "type": "varchar(18)", "nullable": False},
-                    {"name": "AccountId", "type": "varchar(18)", "nullable": True},
-                    {"name": "LastName", "type": "varchar(80)", "nullable": False},
-                    {"name": "Email", "type": "varchar(80)", "nullable": True},
-                ],
-            },
-            "sap": {
-                "KUNNR": [
-                    {"name": "KUNNR", "type": "varchar(10)", "nullable": False},
-                    {"name": "NAME1", "type": "nvarchar(35)", "nullable": False},
-                    {"name": "TELF1", "type": "varchar(16)", "nullable": True},
-                    {"name": "UMSAV", "type": "numeric(15,2)", "nullable": True},
-                ],
-            },
-        }
-
-        analyzer = SchemaAnalyzer()
-        schema_results = analyzer.analyze_all(mock_schemas)
-        inconsistencies = analyzer.generate_inconsistency_report(schema_results)
-
-        run["progress_pct"] = 40.0
-        await asyncio.sleep(0)
-
-        # ── Middleware analysis ───────────────────────────────────────────────
-        from preflight.analysis.middleware_analyzer import MiddlewareAnalyzer
-
-        mw_analyzer = MiddlewareAnalyzer()
-        gaps = mw_analyzer.analyze(systems, scenario_dict, {"inconsistencies": inconsistencies})
-
-        run["progress_pct"] = 65.0
-        await asyncio.sleep(0)
-
-        # ── Readiness score ───────────────────────────────────────────────────
-        from preflight.analysis.readiness_calculator import ReadinessCalculator
-
-        calc = ReadinessCalculator()
-        pipeline_results: List[Dict[str, Any]] = []
-        breakdown = calc.calculate(inconsistencies, pipeline_results, gaps, [])
-
-        run["progress_pct"] = 80.0
-        await asyncio.sleep(0)
-
-        # ── Executive summary ─────────────────────────────────────────────────
-        from preflight.reporting.executive_summary import ExecutiveSummaryGenerator
-
-        summary_gen = ExecutiveSummaryGenerator()
-        executive_summary = summary_gen.generate(
-            verdict=breakdown.verdict,
-            score=breakdown.overall_score,
-            schema_issues=inconsistencies,
-            pipeline_issues=pipeline_results,
-            middleware_gaps=gaps,
-            scenario=scenario_dict,
-            remediation_weeks=breakdown.estimated_remediation_weeks,
+        # ── The real pipeline (shared with the CLI) ─────────────────────────
+        from preflight.analysis.pipeline_runner import (
+            run_diagnostic as run_pipeline,
+            PipelineError,
         )
+
+        def on_progress(event: Dict[str, Any]) -> None:
+            stages = {
+                "connect": 25.0,
+                "schema": 45.0,
+                "pipeline": 65.0,
+                "middleware": 75.0,
+                "score": 85.0,
+                "report": 95.0,
+            }
+            pct = stages.get(event.get("stage"))
+            if pct is not None:
+                run["progress_pct"] = pct
+
+        config = {"scenario": scenario_dict, "analysis": {}, "reporting": {}}
+        try:
+            payload = await run_pipeline(
+                config, mock=False, progress_cb=on_progress, connections=conn_defs
+            )
+        except PipelineError as exc:
+            run["status"] = "failed"
+            run["error_message"] = str(exc)
+            run["completed_at"] = datetime.now(timezone.utc)
+            return
+
+        inconsistencies = payload["schema_inconsistencies"]
+        gaps = payload["middleware_gaps"]
+        pipeline_results = payload["pipeline_bottlenecks"]
+        executive_summary = payload["executive_summary"]
+
+        await asyncio.sleep(0)
 
         # ── Build report payload ──────────────────────────────────────────────
         schema_resp = [
@@ -178,13 +160,30 @@ async def _run_diagnostic(
 
         remediation = _build_remediation(inconsistencies, gaps)
 
+        # Map measured bottleneck rows (CLI shape) onto the API response model.
+        pipeline_resp = [
+            PipelineBottleneckResponse(
+                id=str(uuid.uuid4()),
+                system=row.get("system", ""),
+                bottleneck_type="stress_test",
+                severity=row.get("severity", "INFO"),
+                description=(
+                    f"{row.get('system', 'system')}: p95 {row.get('p95_ms', 0)} ms, "
+                    f"{row.get('error_rate_pct', 0)}% errors at {row.get('actual_qps', 0)} QPS"
+                ),
+                p95_latency_ms=row.get("p95_ms"),
+                error_rate_pct=row.get("error_rate_pct"),
+            ).model_dump()
+            for row in pipeline_results
+        ]
+
         report_payload = {
             "run_id": run_id,
-            "readiness_score": breakdown.overall_score,
-            "verdict": breakdown.verdict,
+            "readiness_score": payload["readiness_score"],
+            "verdict": payload["verdict"],
             "executive_summary": executive_summary,
             "schema_inconsistencies": schema_resp,
-            "pipeline_bottlenecks": [],
+            "pipeline_bottlenecks": pipeline_resp,
             "middleware_gaps": middleware_resp,
             "remediation_plan": remediation,
             "total_effort_min_days": None,
@@ -193,18 +192,17 @@ async def _run_diagnostic(
             "findings_summary": {
                 "schema_inconsistencies": len(schema_resp),
                 "middleware_gaps": len(middleware_resp),
-                "pipeline_bottlenecks": 0,
-                "critical_issues": breakdown.critical_issues,
+                "pipeline_bottlenecks": len(pipeline_results),
+                "critical_issues": payload["critical_count"],
             },
             # Extra fields for HTML reporter
             "scenario_name": request.scenario.name,
-            "critical_count": breakdown.critical_issues,
-            "total_issues": breakdown.total_issues,
-            "remediation_weeks": (
-                f"{breakdown.estimated_remediation_weeks:.0f}"
-                if breakdown.estimated_remediation_weeks
-                else "TBD"
-            ),
+            "critical_count": payload["critical_count"],
+            "total_issues": payload["total_issues"],
+            "remediation_weeks": payload["remediation_weeks"],
+            "entity_matches": payload.get("entity_matches") or [],
+            "warnings": payload.get("warnings") or [],
+            "data_sources": payload.get("data_sources") or {},
         }
 
         reports_store[run_id] = report_payload
@@ -219,63 +217,22 @@ async def _run_diagnostic(
         run["completed_at"] = datetime.now(timezone.utc)
 
 
+def _entities_as_dicts(business_entities) -> List[Dict]:
+    """BusinessEntity models -> dicts; plain strings (legacy clients) ->
+    fieldless dicts, which the matcher accepts and skips."""
+    from preflight.api.schemas import BusinessEntity
+
+    return [
+        be.model_dump() if isinstance(be, BusinessEntity) else {"name": str(be), "fields": []}
+        for be in (business_entities or [])
+    ]
+
+
 def _build_remediation(inconsistencies: List[Dict], gaps: List[Dict]) -> List[Dict]:
-    """Build a prioritised remediation plan from inconsistencies and gaps."""
-    items = []
-    seq = 1
+    """Build a prioritised remediation plan (shared implementation in the runner)."""
+    from preflight.analysis.pipeline_runner import build_remediation_plan
 
-    for gap in gaps:
-        if gap.get("blocking", False):
-            effort = gap.get("effort_days", (5, 20))
-            items.append(
-                RemediationItemResponse(
-                    id=f"rem_{gap.get('id', seq)}",
-                    title=f"Implement {gap.get('type', 'middleware').replace('_', ' ').title()}",
-                    description=gap.get("description", ""),
-                    category="middleware",
-                    priority=9 if gap.get("severity") == "CRITICAL" else 7,
-                    severity=gap.get("severity", "HIGH"),
-                    effort_min_days=effort[0] if isinstance(effort, tuple) else 5,
-                    effort_max_days=effort[1] if isinstance(effort, tuple) else 20,
-                    recommended_sequence=seq,
-                ).model_dump()
-            )
-            seq += 1
-
-    critical_schema = [i for i in inconsistencies if i.get("severity") == "CRITICAL"]
-    if critical_schema:
-        items.append(
-            RemediationItemResponse(
-                id="rem_schema_critical",
-                title="Resolve Critical Schema Mismatches",
-                description=f"Fix {len(critical_schema)} critical key/schema mismatches across systems",
-                category="schema",
-                priority=10,
-                severity="CRITICAL",
-                effort_min_days=len(critical_schema) * 3,
-                effort_max_days=len(critical_schema) * 7,
-                recommended_sequence=seq,
-            ).model_dump()
-        )
-        seq += 1
-
-    high_schema = [i for i in inconsistencies if i.get("severity") == "HIGH"]
-    if high_schema:
-        items.append(
-            RemediationItemResponse(
-                id="rem_schema_high",
-                title="Resolve High-Severity Schema Issues",
-                description=f"Fix {len(high_schema)} high-severity schema issues",
-                category="schema",
-                priority=8,
-                severity="HIGH",
-                effort_min_days=len(high_schema) * 2,
-                effort_max_days=len(high_schema) * 5,
-                recommended_sequence=seq,
-            ).model_dump()
-        )
-
-    return items
+    return build_remediation_plan(inconsistencies, gaps)
 
 
 @router.post(

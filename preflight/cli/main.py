@@ -34,6 +34,9 @@ def run(config: str, output: str, format: str, mock: bool):
 
 async def _run_diagnostic(config_path: str, output_dir: str, format: str, mock: bool):
     """Execute the diagnostic pipeline."""
+    from preflight.analysis import pipeline_runner
+    from preflight.analysis.pipeline_runner import PipelineError
+
     console.print(Panel.fit(
         "[bold blue]Preflight Integration Tester[/bold blue]\n"
         "Pre-purchase AI Readiness Diagnostic",
@@ -60,81 +63,54 @@ async def _run_diagnostic(config_path: str, output_dir: str, format: str, mock: 
         console=console,
     ) as progress:
 
-        # Step 1: Connect
-        connect_task = progress.add_task("[cyan]Connecting to systems...", total=100)
-        await asyncio.sleep(0.5)
-        progress.update(connect_task, completed=100, description="[green]Systems connected")
+        tasks = {
+            'connect': progress.add_task("[cyan]Connecting to systems...", total=100),
+            'schema': progress.add_task("[cyan]Analyzing schema consistency...", total=100),
+            'pipeline': progress.add_task("[cyan]Stress testing pipelines...", total=100),
+            'middleware': progress.add_task("[cyan]Analyzing middleware gaps...", total=100),
+            'score': progress.add_task("[cyan]Calculating readiness score...", total=100),
+            'report': progress.add_task("[cyan]Generating report...", total=100),
+        }
 
-        # Step 2: Schema Analysis
-        schema_task = progress.add_task("[cyan]Analyzing schema consistency...", total=100)
+        def on_progress(event: dict) -> None:
+            task = tasks.get(event.get('stage'))
+            if task is not None:
+                progress.update(task, completed=100, description=f"[green]{event.get('description', '')}")
 
-        from preflight.analysis.schema_analyzer import SchemaAnalyzer
-        analyzer = SchemaAnalyzer(
-            similarity_threshold=config.get('analysis', {}).get('schema_consistency', {}).get('entity_matching_threshold', 0.8)
-        )
+        try:
+            payload = await pipeline_runner.run_diagnostic(config, mock=mock, progress_cb=on_progress)
+        except PipelineError as exc:
+            console.print(f"\n[red]Error:[/red] {exc}")
+            sys.exit(1)
 
-        # Get mock schemas or real schemas
-        if mock:
-            mock_schemas = _get_mock_schemas()
-        else:
-            mock_schemas = _get_mock_schemas()  # TODO: real connector
+        inconsistencies = payload['schema_inconsistencies']
+        gaps = payload['middleware_gaps']
+        warnings = payload.get('warnings') or []
 
-        schema_results = analyzer.analyze_all(mock_schemas)
-        inconsistencies = analyzer.generate_inconsistency_report(schema_results)
-        progress.update(schema_task, completed=100, description=f"[green]Schema analysis: {len(inconsistencies)} issues found")
-
-        # Step 3: Pipeline Testing
-        pipeline_task = progress.add_task("[cyan]Stress testing pipelines...", total=100)
-        await asyncio.sleep(1.0)  # Simulate test
-        pipeline_results = _get_mock_pipeline_results()
-        progress.update(pipeline_task, completed=100, description="[green]Pipeline test complete")
-
-        # Step 4: Middleware Analysis
-        mw_task = progress.add_task("[cyan]Analyzing middleware gaps...", total=100)
-        from preflight.analysis.middleware_analyzer import MiddlewareAnalyzer
-        mw_analyzer = MiddlewareAnalyzer()
-        connections = [{'name': s, 'type': 'ERP' if 'sap' in s else 'CRM'} for s in scenario.get('systems', ['system1'])]
-        gaps = mw_analyzer.analyze(connections, scenario, {'inconsistencies': inconsistencies})
-        progress.update(mw_task, completed=100, description=f"[green]Middleware: {len(gaps)} gaps found")
-
-        # Step 5: Calculate Score
-        score_task = progress.add_task("[cyan]Calculating readiness score...", total=100)
-        from preflight.analysis.readiness_calculator import ReadinessCalculator
-        calc = ReadinessCalculator(weights=config.get('reporting', {}).get('risk_weights'))
-        breakdown = calc.calculate(inconsistencies, pipeline_results, gaps, [])
-        progress.update(score_task, completed=100, description=f"[green]Score calculated: {breakdown.overall_score:.1f}%")
-
-        # Step 6: Generate Report
-        report_task = progress.add_task("[cyan]Generating report...", total=100)
-        from preflight.reporting.html_reporter import HTMLReporter
-        from preflight.reporting.executive_summary import ExecutiveSummaryGenerator
-
-        summary_gen = ExecutiveSummaryGenerator()
-        executive_summary = summary_gen.generate(
-            verdict=breakdown.verdict,
-            score=breakdown.overall_score,
-            schema_issues=inconsistencies,
-            pipeline_issues=pipeline_results,
-            middleware_gaps=gaps,
-            scenario=scenario,
-            remediation_weeks=breakdown.estimated_remediation_weeks,
-        )
+        # Complete any tasks the (mock) fast path did not fire
+        for task in tasks.values():
+            progress.update(task, completed=100)
 
         report_data = {
-            'readiness_score': breakdown.overall_score,
-            'verdict': breakdown.verdict,
-            'scenario_name': scenario.get('name', 'AI Deployment'),
-            'executive_summary': executive_summary,
+            'readiness_score': payload['readiness_score'],
+            'verdict': payload['verdict'],
+            'scenario_name': payload['scenario_name'],
+            'executive_summary': payload['executive_summary'],
             'schema_inconsistencies': [_map_inconsistency(i) for i in inconsistencies],
             'middleware_gaps': [_map_gap(g) for g in gaps],
-            'pipeline_bottlenecks': pipeline_results,
-            'remediation_plan': _build_remediation(inconsistencies, gaps),
-            'critical_count': breakdown.critical_issues,
-            'total_issues': breakdown.total_issues,
-            'remediation_weeks': f"{breakdown.estimated_remediation_weeks:.0f}" if breakdown.estimated_remediation_weeks else "TBD",
+            'pipeline_bottlenecks': payload['pipeline_bottlenecks'],
+            'remediation_plan': payload['remediation_plan'],
+            'critical_count': payload['critical_count'],
+            'total_issues': payload['total_issues'],
+            'remediation_weeks': payload['remediation_weeks'],
+            'entity_matches': payload.get('entity_matches') or [],
+            'warnings': warnings,
+            'mock': payload.get('mock', mock),
+            'data_sources': payload.get('data_sources') or {},
         }
 
         if format == 'html' or format == 'text':
+            from preflight.reporting.html_reporter import HTMLReporter
             reporter = HTMLReporter()
             report_path = Path(output_dir) / 'readiness-assessment.html'
             reporter.save(report_data, str(report_path))
@@ -143,26 +119,34 @@ async def _run_diagnostic(config_path: str, output_dir: str, format: str, mock: 
         with open(json_path, 'w') as f:
             json.dump(report_data, f, indent=2, default=str)
 
-        progress.update(report_task, completed=100, description="[green]Report generated")
+    for warning in warnings:
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+    if any('MOCK data' in w for w in warnings):
+        console.print(
+            "[yellow]Results above include mock data for the flagged systems — "
+            "install the missing client libraries and re-run for real data.[/yellow]"
+        )
 
     # Display results
-    _display_results(breakdown, inconsistencies, gaps, output_dir)
+    _display_results(report_data, inconsistencies, gaps, output_dir)
 
-def _display_results(breakdown, inconsistencies, gaps, output_dir):
+def _display_results(report_data, inconsistencies, gaps, output_dir):
     """Display results in a rich terminal output."""
-    # Score panel
-    score = breakdown.overall_score
-    if score >= 80:
+    # Score panel — color and icon follow the VERDICT (a NOT_YET verdict must
+    # never show a green OK icon just because the score crossed 80).
+    score = report_data['readiness_score']
+    verdict = report_data['verdict']
+    if verdict == 'GO':
         color = "green"
         emoji = "OK"
-    elif score >= 50:
+    elif verdict == 'NOT_YET':
         color = "yellow"
         emoji = "WARN"
     else:
         color = "red"
         emoji = "FAIL"
 
-    verdict_display = breakdown.verdict.replace('_', ' ')
+    verdict_display = report_data['verdict'].replace('_', ' ')
     console.print()
     console.print(Panel(
         f"\n  [{color} bold]{score:.1f}%[/{color} bold]  [{color}]{verdict_display}[/{color}]  {emoji}\n",
@@ -199,49 +183,20 @@ def _display_results(breakdown, inconsistencies, gaps, output_dir):
     console.print(f"  readiness-assessment.html")
     console.print(f"  readiness-assessment.json")
 
-    if breakdown.estimated_remediation_weeks:
-        console.print(f"\n[bold]Estimated remediation:[/bold] {breakdown.estimated_remediation_weeks:.0f}-{breakdown.estimated_remediation_weeks*1.5:.0f} weeks")
+    remediation_weeks = report_data.get('remediation_weeks')
+    if remediation_weeks and remediation_weeks != "TBD":
+        weeks = float(remediation_weeks)
+        console.print(f"\n[bold]Estimated remediation:[/bold] {weeks:.0f}-{weeks*1.5:.0f} weeks")
 
 def _get_mock_schemas():
-    """Return realistic mock enterprise schemas for demo."""
-    return {
-        'salesforce': {
-            'Account': [
-                {'name': 'Id', 'type': 'varchar(18)', 'nullable': False},
-                {'name': 'Name', 'type': 'varchar(255)', 'nullable': False},
-                {'name': 'BillingStreet', 'type': 'text', 'nullable': True},
-                {'name': 'Phone', 'type': 'varchar(40)', 'nullable': True},
-                {'name': 'AnnualRevenue', 'type': 'decimal', 'nullable': True},
-            ],
-            'Contact': [
-                {'name': 'Id', 'type': 'varchar(18)', 'nullable': False},
-                {'name': 'AccountId', 'type': 'varchar(18)', 'nullable': True},
-                {'name': 'FirstName', 'type': 'varchar(40)', 'nullable': True},
-                {'name': 'LastName', 'type': 'varchar(80)', 'nullable': False},
-                {'name': 'Email', 'type': 'varchar(80)', 'nullable': True},
-            ],
-        },
-        'sap': {
-            'KUNNR': [  # Customer master
-                {'name': 'KUNNR', 'type': 'varchar(10)', 'nullable': False},  # Key mismatch!
-                {'name': 'NAME1', 'type': 'nvarchar(35)', 'nullable': False},
-                {'name': 'TELF1', 'type': 'varchar(16)', 'nullable': True},  # Phone format mismatch
-                {'name': 'UMSAV', 'type': 'numeric(15,2)', 'nullable': True},
-            ],
-            'VBELN': [  # Sales order
-                {'name': 'VBELN', 'type': 'varchar(10)', 'nullable': False},
-                {'name': 'KUNNR', 'type': 'varchar(10)', 'nullable': False},
-                {'name': 'ERDAT', 'type': 'varchar(8)', 'nullable': False},  # Date as string!
-            ],
-        },
-    }
+    """Return the frozen demo dataset (see pipeline_runner.demo_schemas)."""
+    from preflight.analysis.pipeline_runner import demo_schemas
+    return demo_schemas()
 
 def _get_mock_pipeline_results():
-    """Return mock pipeline test results."""
-    return [
-        {'system': 'SAP ERP', 'error_rate_pct': 2.5, 'p95_ms': 380, 'actual_qps': 45, 'severity': 'LOW'},
-        {'system': 'Salesforce', 'error_rate_pct': 0.5, 'p95_ms': 180, 'actual_qps': 100, 'severity': 'INFO'},
-    ]
+    """Return the frozen demo pipeline results (see pipeline_runner)."""
+    from preflight.analysis.pipeline_runner import demo_pipeline_results
+    return demo_pipeline_results()
 
 def _map_inconsistency(i: dict) -> dict:
     return {
@@ -253,6 +208,7 @@ def _map_inconsistency(i: dict) -> dict:
         'severity': i.get('severity', 'MEDIUM'),
         'impact_description': i.get('detail', ''),
         'remediation_hint': 'Review field definitions and align schemas',
+        'entity_match': i.get('entity_match'),
     }
 
 def _map_gap(g: dict) -> dict:
@@ -276,42 +232,9 @@ def _map_gap(g: dict) -> dict:
     }
 
 def _build_remediation(inconsistencies: list, gaps: list) -> list:
-    """Build a prioritized remediation plan."""
-    items = []
-    seq = 1
-
-    for gap in gaps:
-        if gap.get('blocking', False):
-            effort = gap.get('effort_days', (5, 20))
-            items.append({
-                'id': f"rem_{gap.get('id', seq)}",
-                'title': f"Implement {gap.get('type', 'middleware').replace('_', ' ').title()}",
-                'description': gap.get('description', ''),
-                'category': 'middleware',
-                'priority': 9 if gap.get('severity') == 'CRITICAL' else 7,
-                'severity': gap.get('severity', 'HIGH'),
-                'effort_min_days': effort[0] if isinstance(effort, tuple) else 5,
-                'effort_max_days': effort[1] if isinstance(effort, tuple) else 20,
-                'recommended_sequence': seq,
-            })
-            seq += 1
-
-    critical_schema = [i for i in inconsistencies if i.get('severity') == 'CRITICAL']
-    if critical_schema:
-        items.append({
-            'id': 'rem_schema_critical',
-            'title': 'Resolve Critical Schema Mismatches',
-            'description': f'Fix {len(critical_schema)} critical key/schema mismatches across systems',
-            'category': 'schema',
-            'priority': 10,
-            'severity': 'CRITICAL',
-            'effort_min_days': len(critical_schema) * 3,
-            'effort_max_days': len(critical_schema) * 7,
-            'recommended_sequence': seq,
-        })
-        seq += 1
-
-    return items
+    """Build a prioritized remediation plan (shared implementation in the runner)."""
+    from preflight.analysis.pipeline_runner import build_remediation_plan
+    return build_remediation_plan(inconsistencies, gaps)
 
 if __name__ == '__main__':
     cli()

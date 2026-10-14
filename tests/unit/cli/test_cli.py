@@ -449,13 +449,25 @@ class TestBuildRemediation:
         categories = [r["category"] for r in result]
         assert "schema" in categories
 
-    def test_non_critical_schema_not_added(self):
+    def test_high_severity_schema_added(self):
+        # Since the shared remediation planner (pipeline_runner), HIGH-severity
+        # schema issues produce a remediation item too — the API route had
+        # already evolved this behavior and the CLI was unified on it.
         inconsistencies = [
             {"entity": "Account", "type": "missing_field", "severity": "HIGH",
              "source": "sf", "target": "sap", "detail": "Field missing"}
         ]
         result = _build_remediation(inconsistencies, [])
-        # HIGH severity schema issues are not added (only CRITICAL triggers action)
+        schema_items = [r for r in result if r["category"] == "schema"]
+        assert len(schema_items) == 1
+        assert schema_items[0]["id"] == "rem_schema_high"
+
+    def test_medium_severity_schema_not_added(self):
+        inconsistencies = [
+            {"entity": "Account", "type": "type_mismatch", "severity": "MEDIUM",
+             "source": "sf", "target": "sap", "detail": "Type mismatch"}
+        ]
+        result = _build_remediation(inconsistencies, [])
         schema_items = [r for r in result if r["category"] == "schema"]
         assert len(schema_items) == 0
 

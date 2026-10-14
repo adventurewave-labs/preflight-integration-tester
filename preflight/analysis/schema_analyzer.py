@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from difflib import SequenceMatcher
 
+from preflight.analysis.entity_matcher import normalize_field_name
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -31,6 +33,10 @@ class EntityComparisonResult:
     missing_in_target: List[str] = field(default_factory=list)
     type_mismatches: List[Tuple[str, str, str]] = field(default_factory=list)  # (field, src_type, tgt_type)
     overall_similarity: float = 0.0
+    # Set when the comparison came from cross-name entity matching
+    # (see EntityMatcher / analyze_entity_groups): describes how the two
+    # tables were linked, e.g. {"method": "vocabulary", "confidence": 0.9}.
+    entity_match: Optional[Dict] = None
 
 class SchemaAnalyzer:
     """Analyzes schema consistency across multiple enterprise systems.
@@ -69,12 +75,15 @@ class SchemaAnalyzer:
         }
 
     def normalize_field_name(self, name: str) -> str:
-        """Normalize field name for comparison (snake_case, lowercase). Cached."""
+        """Normalize field name for comparison (snake_case, lowercase). Cached.
+
+        Delegates to entity_matcher.normalize_field_name — the single source
+        of truth shared with the EntityMatcher so SAP all-caps names
+        (NAME1 → name1) normalize identically everywhere.
+        """
         if name in self._norm_cache:
             return self._norm_cache[name]
-        normalized = re.sub(r'([A-Z])', r'_\1', name).lower()
-        normalized = re.sub(r'[^a-z0-9]', '_', normalized)
-        normalized = re.sub(r'_+', '_', normalized).strip('_')
+        normalized = normalize_field_name(name)
         self._norm_cache[name] = normalized
         return normalized
 
@@ -247,32 +256,79 @@ class SchemaAnalyzer:
 
         return results
 
+    def analyze_entity_groups(
+        self,
+        system_schemas: Dict[str, Dict[str, List[Dict]]],
+        entity_groups: List,
+    ) -> Dict:
+        """Analyze cross-name entity groups produced by :class:`EntityMatcher`.
+
+        Each group renames its member tables to the group's canonical entity
+        name, then the normal comparison logic runs over the renamed view.
+        The group itself is attached to every comparison result as
+        ``entity_match`` so reports can say *how* the tables were linked.
+        """
+        from preflight.analysis.entity_matcher import EntityGroup  # noqa: F401  (type hint)
+
+        results: Dict = {}
+        used_keys: set = set()
+        for group in entity_groups:
+            entity_schemas: Dict[str, List[Dict]] = {}
+            for system, table in group.tables.items():
+                fields = system_schemas.get(system, {}).get(table)
+                if fields:
+                    entity_schemas[system] = fields
+            if len(entity_schemas) < 2:
+                continue
+            comparisons = self.compare_entity_across_systems(
+                group.canonical_name, entity_schemas
+            )
+            for comp in comparisons:
+                comp.entity_match = group.as_match_info()
+            # Two groups may share a canonical name (e.g. an exact-name
+            # "customer" group AND a vocabulary "customer" group over
+            # different systems). Keying by name alone would silently
+            # overwrite one group's findings and inflate the score, so
+            # disambiguate the internal key. The entity_name carried by the
+            # comparisons stays the shared canonical name.
+            key = group.canonical_name
+            n = 2
+            while key in used_keys:
+                key = f"{group.canonical_name}#{n}"
+                n += 1
+            used_keys.add(key)
+            results[key] = comparisons
+        return results
+
     def generate_inconsistency_report(self, analysis_results: Dict) -> List[Dict]:
         """Generate a list of inconsistencies sorted by severity."""
         inconsistencies = []
 
         for entity_name, comparisons in analysis_results.items():
             for comp in comparisons:
+                match_info = getattr(comp, "entity_match", None)
                 # Missing fields
                 for field in comp.missing_in_target:
                     inconsistencies.append({
-                        'entity': entity_name,
+                        'entity': comparisons[0].entity_name,
                         'type': 'missing_field',
                         'severity': 'HIGH',
                         'source': comp.source_system,
                         'target': comp.target_system,
                         'detail': f"Field '{field}' present in {comp.source_system} but missing in {comp.target_system}",
+                        'entity_match': match_info,
                     })
 
                 # Type mismatches
                 for field, src_type, tgt_type in comp.type_mismatches:
                     inconsistencies.append({
-                        'entity': entity_name,
+                        'entity': comparisons[0].entity_name,
                         'type': 'type_mismatch',
                         'severity': 'MEDIUM',
                         'source': comp.source_system,
                         'target': comp.target_system,
                         'detail': f"Field '{field}': {src_type} in {comp.source_system} vs {tgt_type} in {comp.target_system}",
+                        'entity_match': match_info,
                     })
 
                 # Key mismatches (special case for id fields)
@@ -281,12 +337,13 @@ class SchemaAnalyzer:
                 if id_fields_src and id_fields_tgt:
                     if set(id_fields_src) != set(id_fields_tgt):
                         inconsistencies.append({
-                            'entity': entity_name,
+                            'entity': comparisons[0].entity_name,
                             'type': 'key_mismatch',
                             'severity': 'CRITICAL',
                             'source': comp.source_system,
                             'target': comp.target_system,
                             'detail': f"Key fields differ: {id_fields_src} vs {id_fields_tgt}",
+                            'entity_match': match_info,
                         })
 
         # Sort by severity

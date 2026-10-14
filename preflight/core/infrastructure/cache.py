@@ -13,9 +13,11 @@ backend is in use.
 """
 
 import asyncio
+import atexit
 import fnmatch
 import json
 import logging
+import shutil
 import time
 from typing import Any, Dict, Optional
 
@@ -80,11 +82,49 @@ class _InMemoryBackend:
         self._expiry.clear()
 
 
+# Temp directories created by _DiskCacheBackend instances that chose the
+# default (private tempdir) mode. One process-wide atexit handler cleans
+# them all — registering a bound handler per instance would accumulate
+# handlers when caches are created per request.
+_OWNED_TEMPDIRS: set = set()
+_TEMPDIR_CLEANUP_ARMED = False
+
+
+def _cleanup_owned_tempdirs() -> None:
+    for directory in list(_OWNED_TEMPDIRS):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _arm_tempdir_cleanup() -> None:
+    global _TEMPDIR_CLEANUP_ARMED
+    if not _TEMPDIR_CLEANUP_ARMED:
+        atexit.register(_cleanup_owned_tempdirs)
+        _TEMPDIR_CLEANUP_ARMED = True
+
+
 class _DiskCacheBackend:
     """diskcache-based backend with TTL support."""
 
-    def __init__(self, directory: str = "/tmp/preflight_cache"):
+    def __init__(self, directory: Optional[str] = None):
+        # directory=None → diskcache creates a private per-instance temp
+        # directory.  The previous hardcoded "/tmp/preflight_cache" shared
+        # one world-readable directory across ALL instances (and processes),
+        # which broke instance isolation and leaked cached data between
+        # unrelated runs and local users.  Temp directories we create are
+        # removed again at interpreter exit.
+        self._owns_directory = directory is None
         self._cache = diskcache.Cache(directory)
+        if self._owns_directory:
+            _OWNED_TEMPDIRS.add(self._cache.directory)
+            _arm_tempdir_cleanup()
+
+    def close(self) -> None:
+        """Close the cache and remove the temp directory we created."""
+        directory = self._cache.directory
+        self._cache.close()
+        if self._owns_directory:
+            _OWNED_TEMPDIRS.discard(directory)
+            shutil.rmtree(directory, ignore_errors=True)
 
     def get(self, key: str) -> Optional[str]:
         return self._cache.get(key)
@@ -121,14 +161,16 @@ class DiagnosticCache:
         redis_url: Optional Redis connection URL, e.g.
             ``"redis://localhost:6379/0"``.  If not provided or unavailable,
             falls back to diskcache or in-memory.
-        diskcache_dir: Directory for diskcache storage.  Defaults to
-            ``/tmp/preflight_cache``.
+        diskcache_dir: Directory for diskcache storage.  ``None`` (the
+            default) gives each instance a private temp directory; pass an
+            explicit path only when you deliberately want a shared,
+            persistent cache.
     """
 
     def __init__(
         self,
         redis_url: Optional[str] = None,
-        diskcache_dir: str = "/tmp/preflight_cache",
+        diskcache_dir: Optional[str] = None,
     ):
         self._redis_client: Optional[Any] = None
         self._sync_backend: Optional[Any] = None
@@ -151,7 +193,7 @@ class DiagnosticCache:
                 self._sync_backend = _DiskCacheBackend(diskcache_dir)
                 self._backend_name = "diskcache"
                 logger.info(
-                    "DiagnosticCache: using diskcache backend at %s", diskcache_dir
+                    "DiagnosticCache: using diskcache backend at %s", diskcache_dir or "<private tempdir>"
                 )
             else:
                 self._sync_backend = _InMemoryBackend()
@@ -342,6 +384,13 @@ class DiagnosticCache:
                 await self._redis_client.close()
             except Exception as exc:
                 logger.warning("Error closing Redis client: %s", exc)
+        if self._sync_backend is not None:
+            close = getattr(self._sync_backend, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception as exc:
+                    logger.warning("Error closing cache backend: %s", exc)
         logger.info("DiagnosticCache closed")
 
     async def __aenter__(self) -> "DiagnosticCache":
