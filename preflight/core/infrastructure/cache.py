@@ -83,7 +83,12 @@ class _InMemoryBackend:
 class _DiskCacheBackend:
     """diskcache-based backend with TTL support."""
 
-    def __init__(self, directory: str = "/tmp/preflight_cache"):
+    def __init__(self, directory: Optional[str] = None):
+        # directory=None → diskcache creates a private per-instance temp
+        # directory.  The previous hardcoded "/tmp/preflight_cache" shared
+        # one world-readable directory across ALL instances (and processes),
+        # which broke instance isolation and leaked cached data between
+        # unrelated runs and local users.
         self._cache = diskcache.Cache(directory)
 
     def get(self, key: str) -> Optional[str]:
