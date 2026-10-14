@@ -45,3 +45,14 @@ field comparisons impossible.
   review. The seed vocabulary is intentionally small and extensible.
 - Declared entities (from `scenario.entities` in the config) are the
   highest-precision path for users who know their domain model.
+
+## Security considerations (added during review)
+
+The API's connection-test and diagnostic endpoints open real network
+connections to hosts the caller supplies. That is the feature, but the
+reachable/latency signal itself is information: in a multi-tenant
+deployment the API must sit behind an allowlist of permitted hosts, or be
+deployed single-tenant (the intended pre-purchase usage, where the buyer
+runs it against their own systems). Failure messages are deliberately
+coarse — raw driver errors (which can echo host/port/credential details)
+are logged server-side only.

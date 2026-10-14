@@ -306,3 +306,159 @@ class TestNormalizedFieldShared:
         for name in ("NAME1", "KUNNR", "AnnualRevenue", "AccountId", "TELF1"):
             assert normalize_field_name(name) == SchemaAnalyzer().normalize_field_name(name)
         assert normalize_field_name("NAME1") == "name1"
+
+
+class TestRound4Fixes:
+    def test_same_canonical_name_groups_not_dropped(self):
+        """Exact 'customer' {A,B} + vocabulary 'customer' {C,D} must BOTH
+        produce findings — keying by canonical name alone dropped one."""
+        from preflight.analysis.entity_matcher import EntityMatcher
+        from preflight.analysis.schema_analyzer import SchemaAnalyzer
+
+        schemas = {
+            "a": {"customer": _f("id", "name", "email")},
+            "b": {"customers": _f("id", "name", "phone")},  # exact w/ a
+            "c": {"Account": _f("Id", "Name")},
+            "d": {"KUNNR": _f("KUNNR", "NAME1")},  # vocabulary w/ c
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        customer_groups = [g for g in groups if g.canonical_name == "customer"]
+        assert len(customer_groups) == 2
+
+        analyzer = SchemaAnalyzer()
+        results = analyzer.analyze_entity_groups(schemas, groups)
+        inconsistencies = analyzer.generate_inconsistency_report(results)
+        # The exact pair (a vs b: email vs phone missing fields) AND the
+        # vocabulary pair (c vs d) must both contribute findings.
+        pairs = {(i["source"], i["target"]) for i in inconsistencies}
+        assert ("a", "b") in pairs, f"exact-group findings dropped: {pairs}"
+        assert ("c", "d") in pairs, f"vocabulary-group findings dropped: {pairs}"
+
+    def test_field_overlap_first_wins_on_member_side(self):
+        """s2 has two tables matching the anchor; the FIRST stays in the
+        group and the second must not be silently lost to `used`."""
+        schemas = {
+            "s1": {"t1": _f("invoice_num", "invoice_date", "amount")},
+            "s2": {
+                "u1": _f("invoice_num", "invoice_date", "amount"),  # first
+                "u2": _f("invoice_num", "invoice_date", "amount"),  # duplicate
+            },
+        }
+        groups = EntityMatcher().build_entity_groups(schemas)
+        overlap = [g for g in groups if g.method == "field_overlap"]
+        assert len(overlap) == 1
+        assert overlap[0].tables == {"s1": "t1", "s2": "u1"}
+
+    async def test_runner_warnings_never_leak_exception_text(self, monkeypatch):
+        """Warnings reach API callers; they must be coarse, not raw driver
+        errors (which can contain host/port details)."""
+        from preflight.analysis import pipeline_runner as pr
+
+        class ExplodingConnector:
+            def __init__(self, *a, **k):
+                pass
+
+            async def connect(self):
+                raise RuntimeError(
+                    "connection to server at '10.0.0.5', port 5432 failed: "
+                    "FATAL: password authentication failed for user 'prod'"
+                )
+
+            async def disconnect(self):
+                pass
+
+        real_factory = pr.create_connector
+
+        def factory(ctype, config, **kwargs):
+            if ctype == "postgresql":
+                return ExplodingConnector()
+            return real_factory(ctype, config, **kwargs)
+
+        monkeypatch.setattr(pr, "create_connector", factory)
+        connections = [
+            {"name": "demo", "connector_type": "mock", "config": {}},
+            {"name": "prod", "connector_type": "postgresql", "config": {}},
+        ]
+        inputs = await pr.collect_real_inputs(connections, {})
+        joined = " | ".join(inputs.warnings)
+        assert "10.0.0.5" not in joined and "prod'" not in joined
+        assert "connection failed (check host/credentials)" in joined
+
+    async def test_connect_raising_leads_to_pipeline_error(self, monkeypatch):
+        """All connections fail at connect() (not 'unsupported type') ->
+        PipelineError; distinct from the unsupported-type skip path."""
+        from preflight.analysis import pipeline_runner as pr
+
+        class FailingConnector:
+            def __init__(self, *a, **k):
+                pass
+
+            async def connect(self):
+                return False
+
+            async def disconnect(self):
+                pass
+
+        monkeypatch.setattr(
+            pr, "create_connector", lambda *a, **k: FailingConnector()
+        )
+        connections = [{"name": "prod", "connector_type": "postgresql", "config": {}}]
+        with pytest.raises(pr.PipelineError):
+            await pr.collect_real_inputs(connections, {})
+
+
+class TestApiDiagnosticsMapping:
+    async def test_pipeline_rows_mapped_to_response_shape(self, monkeypatch):
+        """API-level: measured bottleneck rows survive the response model."""
+        import json
+        from fastapi.testclient import TestClient
+        from preflight.api.dependencies import (
+            _connections_store, _runs_store, _reports_store,
+        )
+        from preflight.api.app import create_app
+        from preflight.analysis import pipeline_runner
+
+        _connections_store.clear(); _runs_store.clear(); _reports_store.clear()
+        app = create_app()
+
+        async def fake_run_diagnostic(config, mock=False, progress_cb=None, connections=None):
+            return {
+                "readiness_score": 90.0, "verdict": "GO",
+                "scenario_name": "t", "executive_summary": "s",
+                "schema_inconsistencies": [], "middleware_gaps": [],
+                "pipeline_bottlenecks": [
+                    {"system": "db", "error_rate_pct": 0.0,
+                     "p95_ms": 12.5, "actual_qps": 8.0, "severity": "INFO"}
+                ],
+                "remediation_plan": [], "critical_count": 0,
+                "total_issues": 1, "remediation_weeks": "4",
+                "entity_matches": [], "warnings": ["db: coarse warning"],
+            }
+
+        monkeypatch.setattr(
+            pipeline_runner, "run_diagnostic", fake_run_diagnostic
+        )
+
+        with TestClient(app) as client:
+            conn = client.post("/connections", json={
+                "name": "db", "connector_type": "mock",
+                "system_type": "DATABASE", "config": {},
+            }).json()
+            run = client.post("/diagnostics", json={
+                "name": "mapping-test",
+                "scenario": {"name": "t", "target_systems": ["db"]},
+                "connection_ids": [conn["id"]],
+            }).json()
+            # BackgroundTasks in TestClient run before the response returns;
+            # poll briefly in case of scheduling.
+            for _ in range(20):
+                report = client.get(f"/reports/{run['id']}")
+                if report.status_code == 200:
+                    break
+                import time as _t; _t.sleep(0.1)
+            assert report.status_code == 200, report.text
+            rows = report.json()["pipeline_bottlenecks"]
+            assert rows and rows[0]["system"] == "db"
+            assert rows[0]["bottleneck_type"] == "stress_test"
+            assert "p95" in rows[0]["description"]
+            assert rows[0]["p95_latency_ms"] == 12.5

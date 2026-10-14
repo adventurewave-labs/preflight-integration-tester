@@ -271,6 +271,7 @@ class SchemaAnalyzer:
         from preflight.analysis.entity_matcher import EntityGroup  # noqa: F401  (type hint)
 
         results: Dict = {}
+        used_keys: set = set()
         for group in entity_groups:
             entity_schemas: Dict[str, List[Dict]] = {}
             for system, table in group.tables.items():
@@ -284,7 +285,19 @@ class SchemaAnalyzer:
             )
             for comp in comparisons:
                 comp.entity_match = group.as_match_info()
-            results[group.canonical_name] = comparisons
+            # Two groups may share a canonical name (e.g. an exact-name
+            # "customer" group AND a vocabulary "customer" group over
+            # different systems). Keying by name alone would silently
+            # overwrite one group's findings and inflate the score, so
+            # disambiguate the internal key. The entity_name carried by the
+            # comparisons stays the shared canonical name.
+            key = group.canonical_name
+            n = 2
+            while key in used_keys:
+                key = f"{group.canonical_name}#{n}"
+                n += 1
+            used_keys.add(key)
+            results[key] = comparisons
         return results
 
     def generate_inconsistency_report(self, analysis_results: Dict) -> List[Dict]:

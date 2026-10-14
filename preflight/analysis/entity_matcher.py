@@ -287,7 +287,10 @@ class EntityMatcher:
             scores = []
             for sys_b, tab_b, fields_b in candidates[i + 1 :]:
                 key_b = (sys_b, normalize_table_name(tab_b))
-                if sys_b == sys_a or key_b in used:
+                if sys_b == sys_a or sys_b in group_tables or key_b in used:
+                    # one table per system, first wins — do NOT mark the
+                    # skipped table as used, the second sweep may still
+                    # attach it elsewhere
                     continue
                 score = self.table_pair_score(fields_a, fields_b)
                 if score >= self.pair_field_threshold:

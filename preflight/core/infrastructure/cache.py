@@ -82,6 +82,26 @@ class _InMemoryBackend:
         self._expiry.clear()
 
 
+# Temp directories created by _DiskCacheBackend instances that chose the
+# default (private tempdir) mode. One process-wide atexit handler cleans
+# them all — registering a bound handler per instance would accumulate
+# handlers when caches are created per request.
+_OWNED_TEMPDIRS: set = set()
+_TEMPDIR_CLEANUP_ARMED = False
+
+
+def _cleanup_owned_tempdirs() -> None:
+    for directory in list(_OWNED_TEMPDIRS):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _arm_tempdir_cleanup() -> None:
+    global _TEMPDIR_CLEANUP_ARMED
+    if not _TEMPDIR_CLEANUP_ARMED:
+        atexit.register(_cleanup_owned_tempdirs)
+        _TEMPDIR_CLEANUP_ARMED = True
+
+
 class _DiskCacheBackend:
     """diskcache-based backend with TTL support."""
 
@@ -95,16 +115,8 @@ class _DiskCacheBackend:
         self._owns_directory = directory is None
         self._cache = diskcache.Cache(directory)
         if self._owns_directory:
-            atexit.register(self._cleanup_tempdir)
-
-    def _cleanup_tempdir(self) -> None:
-        """Close the cache and remove the temp directory we created."""
-        try:
-            directory = self._cache.directory
-            self._cache.close()
-            shutil.rmtree(directory, ignore_errors=True)
-        except Exception:  # pragma: no cover - best-effort cleanup
-            pass
+            _OWNED_TEMPDIRS.add(self._cache.directory)
+            _arm_tempdir_cleanup()
 
     def get(self, key: str) -> Optional[str]:
         return self._cache.get(key)

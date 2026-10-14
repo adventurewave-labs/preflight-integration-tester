@@ -288,7 +288,12 @@ async def run_pipeline_tests(
                 system.name, query_fn, stress_scenario
             )
         except Exception as exc:
-            inputs.warnings.append(f"{system.name}: pipeline stress test failed: {exc}")
+            logger.warning(
+                "%s: pipeline stress test failed: %s", system.name, exc
+            )
+            inputs.warnings.append(
+                f"{system.name}: pipeline stress test failed"
+            )
             continue
         rows.append(
             {
