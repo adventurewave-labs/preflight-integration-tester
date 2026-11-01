@@ -125,6 +125,15 @@ Estimated Remediation: 8-12 weeks
 - **Vendor Evaluation**: Objective comparison of integration requirements
 - **Budget Planning**: Realistic effort estimates for AI readiness work
 
+### Guided Diagnostic
+
+Run it yourself — the CLI is free under MIT. Or have it run for you:
+[CreandoTuMatrix](https://creandotumatrix.com) (Adventure Wave Labs' Latin
+American affiliate; Spanish and English) delivers guided diagnostics on this
+engine — read-only connectors against your own ERP/CRM/warehouse, a debriefed
+readiness report, and the remediation backlog to take into vendor negotiations:
+[book the Diagnóstico](https://creandotumatrix.com).
+
 ## 🚦 Getting Started
 
 ### Prerequisites
