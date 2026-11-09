@@ -1,0 +1,10 @@
+# preflight-integration-tester
+
+> Pre-alpha AI-readiness diagnostic — tests data and integration paths for pilot-purgatory risk before enterprise AI deployment.
+
+preflight-integration-tester is maintained by Adventure Wave Labs (The lab for agentic developer tooling).
+
+## Links
+
+- [Landing page](https://adventurewave-labs.github.io/preflight-integration-tester/): overview, features, FAQ
+- [Source code](https://github.com/adventurewave-labs/preflight-integration-tester): README, issues, releases
